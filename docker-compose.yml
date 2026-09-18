@@ -1,0 +1,32 @@
+# One-command deployment: `docker compose up -d`
+# Fill in .env first (copy .env.example). DATABASE_URL below overrides the .env value
+# so the bot talks to the bundled Postgres.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ranked
+      POSTGRES_PASSWORD: ranked
+      POSTGRES_DB: ranked_bot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ranked -d ranked_bot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ranked:ranked@db:5432/ranked_bot
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && python -m bot.main"
+
+volumes:
+  pgdata:

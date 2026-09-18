@@ -11,9 +11,10 @@ from bot import config as _cfg
 log = logging.getLogger("ranked-bot.riot")
 
 _PLATFORM_HOSTS = {
-    "americas": "americas.api.riotgames.com",
-    "europe":   "europe.api.riotgames.com",
-    "asia":     "asia.api.riotgames.com",
+    "americas": "americas.api.riotgames.com",   # na1, br1, la1, la2
+    "europe":   "europe.api.riotgames.com",     # euw1, eun1, tr1, ru, me1
+    "asia":     "asia.api.riotgames.com",       # kr, jp1
+    "sea":      "sea.api.riotgames.com",        # oc1, ph2, sg2, th2, tw2, vn2
 }
 
 _REGION_HOSTS = {
