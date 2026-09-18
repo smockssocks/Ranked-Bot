@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, JSON, UniqueConstraint, func
+from sqlalchemy import String, Integer, DateTime, ForeignKey, JSON, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from bot.db.database import Base
 
@@ -12,7 +12,7 @@ class Lobby(Base):
     channel_id: Mapped[str] = mapped_column(String(32), nullable=False)
     message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     host_discord_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    mode: Mapped[str] = mapped_column(String(16), server_default="captain")  # captain / pick_order
+    mode: Mapped[str] = mapped_column(String(16), server_default="captain")  # captain / balanced / pick_order
     status: Mapped[str] = mapped_column(String(16), server_default="waiting")
     # waiting / drafting / active / completed / cancelled
     max_players: Mapped[int] = mapped_column(Integer, server_default="10")
@@ -20,6 +20,13 @@ class Lobby(Base):
     captain1_id: Mapped[int | None] = mapped_column(ForeignKey("players.id"), nullable=True)
     captain2_id: Mapped[int | None] = mapped_column(ForeignKey("players.id"), nullable=True)
     draft_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # drafter.lol
+    drafter_series_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    drafter_links: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    drafter_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    team1_name: Mapped[str | None] = mapped_column(String(35), nullable=True)
+    team2_name: Mapped[str | None] = mapped_column(String(35), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -34,6 +41,7 @@ class LobbyPlayer(Base):
     lobby_id: Mapped[int] = mapped_column(ForeignKey("lobbies.id"), nullable=False)
     player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), nullable=False)
     preferred_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    secondary_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     team: Mapped[int | None] = mapped_column(Integer, nullable=True)
     assigned_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     pick_order: Mapped[int | None] = mapped_column(Integer, nullable=True)

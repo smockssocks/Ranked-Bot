@@ -14,10 +14,7 @@ if config.config_file_name is not None:
 
 # Import all models so Base.metadata is populated
 from bot.db.database import Base
-import bot.models.player   # noqa: F401
-import bot.models.rating   # noqa: F401
-import bot.models.game     # noqa: F401
-import bot.models.lobby    # noqa: F401
+import bot.models  # noqa: F401  (registers every table)
 
 target_metadata = Base.metadata
 

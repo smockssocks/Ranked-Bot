@@ -7,15 +7,16 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+_engine_kwargs = {"echo": False}
+if not DATABASE_URL.startswith("sqlite"):
+    _engine_kwargs["pool_pre_ping"] = True
+
+engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-async def get_session() -> AsyncSession:
-    async with SessionLocal() as session:
-        yield session
-
-
 async def init_db():
+    """Create any missing tables (dev / sqlite). Production uses alembic migrations."""
+    import bot.models  # noqa: F401  ensure all models are registered
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

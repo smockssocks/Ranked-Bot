@@ -1,277 +1,354 @@
 """
-Orchestrates post-game processing:
-  1. Fetch match + timeline from Riot API
-  2. Extract per-player per-interval stats
-  3. Build P matrix (normalize across 10 players)
-  4. Build W matrix (once per game, shared)
-  5. Call rating_engine.compute_lp_delta for each player
-  6. Write results to DB
+Post-game pipeline:
+  1. fetch match + timeline from Riot (or accept pre-fetched JSON)
+  2. metrics.extract_all  -> per-player metric dicts
+  3. rating_engine.performance_score for all 10 players (linked or not, so team
+     means and in-game pools are complete)
+  4. rating_engine.compute_update for every linked player, OVERALL + role rows
+  5. update per-role community baselines (Welford)
+  6. persist Game / GameParticipant rows with a human readable explanation
+  7. run the anti-smurf detector for the players involved
+
+reprocess_match() restores the exact pre-game state stored on each participant
+row, then runs the pipeline again (use it for the most recent games only).
 """
 from __future__ import annotations
+
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.models.player import Player
+from bot import config
 from bot.models.game import Game, GameParticipant
-from bot.models.rating import PlayerRating
-from bot.services import rating_engine
-from bot.services.riot_api import RiotClient, RiotAPIError
-from bot.services.rating_engine import DEFAULT_WEIGHT_CONFIG as ENGINE_DEFAULT_CONFIG
-from bot.config import RIOT_REGION
+from bot.models.player import Player
+from bot.models.rating import PlayerRating, RoleBaseline
+from bot.services import metrics as metrics_svc
+from bot.services import rating_engine as re_
+from bot.services.riot_api import RiotAPIError, RiotClient
 
 log = logging.getLogger("ranked-bot.processor")
 
+
+@dataclass
+class PlayerResult:
+    player: Player
+    role: str
+    team: int
+    won: bool
+    champion: str
+    kda: str
+    perf_score: float
+    carry_factor: float
+    lp_before: int
+    lp_after: int
+    lp_delta: int
+    explanation: str
+    top_positive: list[str]
+    top_negative: list[str]
+    placement: bool
+
+
+@dataclass
+class ProcessResult:
+    game: Game
+    results: list[PlayerResult] = field(default_factory=list)
+    unlinked: list[str] = field(default_factory=list)
+    remake: bool = False
+    smurf_flags: list[Any] = field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Rating row helpers                                                          #
+# --------------------------------------------------------------------------- #
+
+async def get_or_create_rating(session: AsyncSession, player_id: int, role: str, season: int) -> PlayerRating:
+    r = await session.scalar(
+        select(PlayerRating).where(
+            PlayerRating.player_id == player_id,
+            PlayerRating.role == role,
+            PlayerRating.season == season,
+        )
+    )
+    if r is None:
+        r = PlayerRating(
+            player_id=player_id, role=role, season=season,
+            lp=config.STARTING_LP, mmr=config.STARTING_MMR, rd=config.STARTING_RD,
+            peak_lp=config.STARTING_LP,
+        )
+        session.add(r)
+        await session.flush()
+    return r
+
+
+def _state(r: PlayerRating) -> re_.RatingState:
+    return re_.RatingState(mmr=r.mmr, rd=r.rd, lp=r.lp, games=r.games_played,
+                           perf_mean=r.perf_mean, perf_var=r.perf_var)
+
+
+def _snapshot(r: PlayerRating) -> dict[str, float]:
+    return {"lp": r.lp, "mmr": r.mmr, "rd": r.rd, "games_played": r.games_played, "wins": r.wins,
+            "perf_mean": r.perf_mean, "perf_var": r.perf_var, "peak_lp": r.peak_lp, "streak": r.streak}
+
+
+def _restore(r: PlayerRating, snap: dict[str, float]) -> None:
+    r.lp = int(snap["lp"]); r.mmr = float(snap["mmr"]); r.rd = float(snap["rd"])
+    r.games_played = int(snap["games_played"]); r.wins = int(snap["wins"])
+    r.perf_mean = float(snap["perf_mean"]); r.perf_var = float(snap["perf_var"])
+    r.peak_lp = int(snap.get("peak_lp", r.peak_lp)); r.streak = int(snap.get("streak", 0))
+
+
+def _apply(r: PlayerRating, upd: re_.RatingUpdate, won: bool, now: datetime) -> None:
+    r.lp = upd.lp_after
+    r.mmr = upd.mmr_after
+    r.rd = upd.rd_after
+    r.perf_mean = upd.perf_mean_after
+    r.perf_var = upd.perf_var_after
+    r.games_played += 1
+    if won:
+        r.wins += 1
+        r.streak = r.streak + 1 if r.streak >= 0 else 1
+    else:
+        r.streak = r.streak - 1 if r.streak <= 0 else -1
+    r.peak_lp = max(r.peak_lp or 0, r.lp)
+    r.last_played_at = now
+
+
+def apply_inactivity(r: PlayerRating, now: datetime) -> None:
+    """Grow RD for players who have not played in a while (called before an update)."""
+    if r.last_played_at is None:
+        return
+    last = r.last_played_at if r.last_played_at.tzinfo else r.last_played_at.replace(tzinfo=timezone.utc)
+    days = (now - last).total_seconds() / 86400.0
+    if days > config.INACTIVITY_DECAY_DAYS:
+        r.rd = re_.grow_rd(r.rd, days - config.INACTIVITY_DECAY_DAYS)
+
+
+async def load_baselines(session: AsyncSession, season: int) -> dict[str, tuple[RoleBaseline, re_.Baseline]]:
+    out: dict[str, tuple[RoleBaseline, re_.Baseline]] = {}
+    for role in re_.ROLES:
+        row = await session.scalar(select(RoleBaseline).where(RoleBaseline.role == role, RoleBaseline.season == season))
+        if row is None:
+            row = RoleBaseline(role=role, season=season, stats=None, sample_size=0)
+            session.add(row)
+            await session.flush()
+        out[role] = (row, re_.Baseline.from_dict(row.stats, role))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Main pipeline                                                               #
+# --------------------------------------------------------------------------- #
 
 async def process_match(
     session: AsyncSession,
     match_id: str,
     submitted_by: str,
     lobby_id: int | None = None,
-    weight_config: dict | None = None,
-) -> Game:
-    """
-    Full pipeline: fetch Riot data → compute LP deltas → persist to DB.
-    Returns the Game ORM object with status='processed' (or 'error').
-    """
-    # Check for duplicate
+    auto_detected: bool = False,
+    match_data: dict | None = None,
+    timeline_data: dict | None = None,
+    season: int | None = None,
+) -> ProcessResult:
+    season = season or config.CURRENT_SEASON
+    now = datetime.now(timezone.utc)
+
     existing = await session.scalar(select(Game).where(Game.riot_match_id == match_id))
     if existing:
-        if existing.status == "processed":
+        if existing.status in ("processed", "remake"):
             raise ValueError(f"Match {match_id} has already been processed.")
-        # Allow re-running a failed/pending game
         game = existing
+        game.lobby_id = game.lobby_id or lobby_id
     else:
-        game = Game(
-            riot_match_id=match_id,
-            region=RIOT_REGION,
-            lobby_id=lobby_id,
-            submitted_by=submitted_by,
-            submitted_at=datetime.now(timezone.utc),
-        )
+        game = Game(riot_match_id=match_id, region=config.RIOT_REGION, lobby_id=lobby_id,
+                    submitted_by=submitted_by, submitted_at=now, season=season, auto_detected=auto_detected)
         session.add(game)
         await session.flush()
 
-    wc = weight_config or ENGINE_DEFAULT_CONFIG
-    game.weight_config = _serialize_weight_config(wc)
-
-    try:
-        async with RiotClient() as riot:
-            match_data = await riot.get_match(match_id)
-            timeline_data = await riot.get_match_timeline(match_id)
-    except RiotAPIError as e:
-        game.status = "error"
-        game.processing_notes = {"error": str(e)}
-        await session.commit()
-        raise
-
-    game.raw_riot_data = {"match": match_data, "timeline": timeline_data}
+    if match_data is None or timeline_data is None:
+        try:
+            async with RiotClient() as riot:
+                match_data = match_data or await riot.get_match(match_id)
+                timeline_data = timeline_data or await riot.get_match_timeline(match_id)
+        except RiotAPIError as e:
+            game.status = "error"
+            game.processing_notes = {"error": str(e)}
+            await session.commit()
+            raise
 
     info = match_data["info"]
-    game.game_duration_secs = info.get("gameDuration", 0)
-    game_duration_mins = game.game_duration_secs / 60.0
-
-    played_ms = info.get("gameCreation", 0)
-    if played_ms:
-        game.played_at = datetime.fromtimestamp(played_ms / 1000, tz=timezone.utc)
-
-    # Determine winner team (100 = blue = team1, 200 = red = team2)
+    game.raw_riot_data = {"match": match_data, "timeline": timeline_data}
+    dur = int(info.get("gameDuration") or 0)
+    if dur > 20_000:
+        dur //= 1000
+    game.game_duration_secs = dur
+    if info.get("gameCreation"):
+        game.played_at = datetime.fromtimestamp(info["gameCreation"] / 1000, tz=timezone.utc)
     for team in info.get("teams", []):
         if team.get("win"):
             game.winner_team = 1 if team["teamId"] == 100 else 2
             break
 
-    # Extract per-player timeline stats
-    per_player_stats = RiotClient.extract_per_player_timeline(
-        match_data, timeline_data, interval_mins=5.0
-    )
+    result = ProcessResult(game=game)
 
-    participants = info["participants"]
-    puuid_to_participant = {p["puuid"]: p for p in participants}
+    if metrics_svc.is_remake(match_data, config.MIN_GAME_MINUTES):
+        game.status = "remake"
+        game.processed_at = now
+        game.processing_notes = {"reason": f"shorter than {config.MIN_GAME_MINUTES} min or early surrender"}
+        await session.commit()
+        result.remake = True
+        return result
 
-    # Build W matrix once — same for all players in this game
-    W = rating_engine.build_weight_matrix(game_duration_mins, weight_config=wc)
+    all_metrics = metrics_svc.extract_all(match_data, timeline_data)
+    pools = metrics_svc.in_game_pools(all_metrics)
+    duration_mins = max(1.0, dur / 60.0)
+    baselines = await load_baselines(session, season)
+    baselines_before = {role: bl.to_dict() for role, (_row, bl) in baselines.items()}
 
-    # Build P matrices for all players first (needed for normalization)
-    puuid_to_P: dict[str, object] = {}
-    for puuid, interval_stats in per_player_stats.items():
-        P = rating_engine.build_performance_matrix(interval_stats, game_duration_mins)
-        puuid_to_P[puuid] = P
+    # 1. performance scores for everyone
+    perf: dict[str, re_.PerfResult] = {}
+    for puuid, m in all_metrics.items():
+        perf[puuid] = re_.performance_score(m, m["role"], baselines[m["role"]][1], pools, duration_mins)
 
-    all_P_matrices = list(puuid_to_P.values())
-
-    # Fetch LP for all players to compute team averages
-    puuid_to_db_player: dict[str, Player] = {}
-    puuid_to_rating: dict[str, PlayerRating] = {}
-    for p_data in participants:
-        puuid = p_data["puuid"]
-        db_player = await session.scalar(select(Player).where(Player.riot_puuid == puuid))
-        if db_player is None:
-            log.warning("Player with PUUID %s not linked in DB — skipping LP update", puuid[:12])
+    # 2. link players / ratings
+    linked: dict[str, Player] = {}
+    overall: dict[str, PlayerRating] = {}
+    role_rows: dict[str, PlayerRating] = {}
+    for puuid, m in all_metrics.items():
+        p = await session.scalar(select(Player).where(Player.riot_puuid == puuid))
+        if p is None:
+            result.unlinked.append(m["riot_id"])
             continue
-        puuid_to_db_player[puuid] = db_player
+        linked[puuid] = p
+        o = await get_or_create_rating(session, p.id, "OVERALL", season)
+        rr = await get_or_create_rating(session, p.id, m["role"], season)
+        apply_inactivity(o, now)
+        apply_inactivity(rr, now)
+        overall[puuid] = o
+        role_rows[puuid] = rr
 
-        rating = await session.scalar(
-            select(PlayerRating).where(
-                PlayerRating.player_id == db_player.id,
-                PlayerRating.role == "OVERALL",
-            )
-        )
-        if rating is None:
-            rating = PlayerRating(player_id=db_player.id, role="OVERALL")
-            session.add(rating)
-            await session.flush()
-        puuid_to_rating[puuid] = rating
+    def team_mmrs(team: int) -> list[float]:
+        return [overall[pu].mmr if pu in overall else config.STARTING_MMR
+                for pu, m in all_metrics.items() if m["team"] == team]
 
-    # Team average LP
-    team1_pids = [p["puuid"] for p in participants if p["teamId"] == 100]
-    team2_pids = [p["puuid"] for p in participants if p["teamId"] == 200]
+    t1, t2 = team_mmrs(1), team_mmrs(2)
+    game.team1_expected_win = re_.expected_win(t1, t2)
+    team_ps = {1: [perf[pu].score for pu, m in all_metrics.items() if m["team"] == 1],
+               2: [perf[pu].score for pu, m in all_metrics.items() if m["team"] == 2]}
 
-    def avg_lp(puuids: list[str]) -> float:
-        lps = [puuid_to_rating[pu].lp for pu in puuids if pu in puuid_to_rating]
-        return sum(lps) / len(lps) if lps else 0.0
+    # 3. rating updates for linked players
+    for puuid, p in linked.items():
+        m = all_metrics[puuid]
+        pr = perf[puuid]
+        team = m["team"]
+        own, opp = (t1, t2) if team == 1 else (t2, t1)
+        o, rr = overall[puuid], role_rows[puuid]
+        snap_o, snap_r = _snapshot(o), _snapshot(rr)
 
-    team1_avg = avg_lp(team1_pids)
-    team2_avg = avg_lp(team2_pids)
+        upd_o = re_.compute_update(_state(o), m["win"], pr.score, team_ps[team], own, opp, config.PLACEMENT_GAMES)
+        upd_r = re_.compute_update(_state(rr), m["win"], pr.score, team_ps[team], own, opp, config.PLACEMENT_GAMES)
+        placement = o.games_played < config.PLACEMENT_GAMES
+        _apply(o, upd_o, m["win"], now)
+        _apply(rr, upd_r, m["win"], now)
 
-    game.team1_expected_win = rating_engine._win_probability(team1_avg, team2_avg)
-
-    # Process each participant
-    for p_data in participants:
-        puuid = p_data["puuid"]
-        participant_data = puuid_to_participant[puuid]
-        won = participant_data.get("win", False)
-        team_num = 1 if participant_data["teamId"] == 100 else 2
-        role = (
-            participant_data.get("teamPosition")
-            or participant_data.get("individualPosition")
-            or "UNKNOWN"
-        ).upper()
-
-        P_raw = puuid_to_P.get(puuid)
-        if P_raw is None:
-            continue
-
-        P_norm = rating_engine.normalize_performance_matrix(P_raw, all_P_matrices)
-
-        db_player = puuid_to_db_player.get(puuid)
-        if db_player is None:
-            continue
-
-        rating = puuid_to_rating.get(puuid)
-        if rating is None:
-            continue
-
-        team_avg = team1_avg if team_num == 1 else team2_avg
-        opp_avg  = team2_avg if team_num == 1 else team1_avg
-
-        lp_before = rating.lp
-        lp_delta = rating_engine.compute_lp_delta(
-            P_norm, W,
-            player_lp=lp_before,
-            won=won,
-            team_avg_lp=team_avg,
-            opponent_avg_lp=opp_avg,
-        )
-        impact_score = float((P_norm * W).sum())
-
-        # Update rating
-        rating.lp = max(0, lp_before + lp_delta)
-        rating.games_played += 1
-        if won:
-            rating.wins += 1
-        rating.last_played_at = datetime.now(timezone.utc)
-
-        # Remove stale participant row if reprocessing
-        old_part = await session.scalar(
-            select(GameParticipant).where(
-                GameParticipant.game_id == game.id,
-                GameParticipant.player_id == db_player.id,
-            )
-        )
-        if old_part:
-            await session.delete(old_part)
+        old = await session.scalar(select(GameParticipant).where(
+            GameParticipant.game_id == game.id, GameParticipant.player_id == p.id))
+        if old:
+            await session.delete(old)
             await session.flush()
 
-        participant_row = GameParticipant(
-            game_id=game.id,
-            player_id=db_player.id,
-            team=team_num,
-            role=role,
-            champion_id=participant_data.get("championId"),
-            champion_name=participant_data.get("championName"),
-            win=won,
-            kills=participant_data.get("kills", 0),
-            deaths=participant_data.get("deaths", 0),
-            assists=participant_data.get("assists", 0),
-            cs_total=participant_data.get("totalMinionsKilled", 0) + participant_data.get("neutralMinionsKilled", 0),
-            vision_score=participant_data.get("visionScore", 0),
-            damage_dealt=participant_data.get("totalDamageDealtToChampions", 0),
-            gold_earned=participant_data.get("goldEarned", 0),
-            impact_score=impact_score,
-            lp_before=lp_before,
-            lp_after=rating.lp,
-            lp_delta=lp_delta,
-            mmr_before=rating.mmr,
-            mmr_after=rating.mmr,
-        )
-        session.add(participant_row)
+        stored_metrics = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in m.items()}
+        stored_metrics["_z"] = {k: round(v, 3) for k, v in pr.z.items()}
+        stored_metrics["_contrib"] = {k: round(v, 3) for k, v in pr.contributions.items()}
+        stored_metrics["_overall_before"] = snap_o
+        stored_metrics["_role_before"] = snap_r
+        stored_metrics["_role_lp_delta"] = upd_r.lp_delta
+
+        session.add(GameParticipant(
+            game_id=game.id, player_id=p.id, team=team, role=m["role"],
+            champion_id=m["champion_id"], champion_name=m["champion_name"], win=m["win"],
+            kills=m["kills"], deaths=m["deaths"], assists=m["assists"], cs_total=m["cs_total"],
+            vision_score=m["vision_score"], damage_dealt=m["damage_dealt"], gold_earned=m["gold_earned"],
+            impact_score=pr.score, carry_factor=upd_o.carry_factor, expected_win=upd_o.expected_win,
+            metrics=stored_metrics, explanation=upd_o.explanation,
+            lp_before=snap_o["lp"], lp_after=o.lp, lp_delta=upd_o.lp_delta,
+            mmr_before=snap_o["mmr"], mmr_after=o.mmr, rd_before=snap_o["rd"], rd_after=o.rd,
+        ))
+        result.results.append(PlayerResult(
+            player=p, role=m["role"], team=team, won=m["win"], champion=m["champion_name"] or "?",
+            kda=f"{m['kills']}/{m['deaths']}/{m['assists']}", perf_score=pr.score,
+            carry_factor=upd_o.carry_factor, lp_before=int(snap_o["lp"]), lp_after=o.lp,
+            lp_delta=upd_o.lp_delta, explanation=upd_o.explanation,
+            top_positive=pr.top_positive, top_negative=pr.top_negative, placement=placement,
+        ))
+
+    # 4. learn baselines from all 10 players
+    for puuid, m in all_metrics.items():
+        row, bl = baselines[m["role"]]
+        bl.update(m)
+        row.stats = bl.to_dict()
+        row.sample_size = bl.n
 
     game.status = "processed"
-    game.processed_at = datetime.now(timezone.utc)
+    game.processed_at = now
+    game.processing_notes = {"unlinked": result.unlinked, "duration_mins": round(duration_mins, 1),
+                             "_baselines_before": baselines_before}
     await session.commit()
 
-    log.info("Processed match %s — %d players updated", match_id, len(puuid_to_db_player))
-    return game
+    # 5. anti-smurf pass (never breaks processing)
+    if config.SMURF_ENABLED and linked:
+        try:
+            from bot.services import smurf_detector
+            result.smurf_flags = await smurf_detector.evaluate_after_game(
+                session, [p.id for p in linked.values()], season)
+        except Exception:  # pragma: no cover - defensive
+            log.exception("smurf detector failed for %s", match_id)
+
+    log.info("Processed %s: %d linked, %d unlinked", match_id, len(linked), len(result.unlinked))
+    return result
 
 
-async def reprocess_match(
-    session: AsyncSession,
-    match_id: str,
-    submitted_by: str,
-) -> Game:
-    """
-    Roll back LP changes from a previously processed game, then reprocess.
-    Uses the weight_config stored at time of original processing.
-    """
+async def rollback_match(session: AsyncSession, match_id: str) -> Game:
+    """Restore every participant's pre-game rating state and mark the game rolled_back."""
     game = await session.scalar(select(Game).where(Game.riot_match_id == match_id))
     if not game:
         raise ValueError(f"Match {match_id} not found in database.")
-
-    # Roll back LP for all participants
-    for part in game.participants:
-        rating = await session.scalar(
-            select(PlayerRating).where(
-                PlayerRating.player_id == part.player_id,
-                PlayerRating.role == "OVERALL",
-            )
-        )
-        if rating:
-            rating.lp = max(0, rating.lp - part.lp_delta)
-            rating.games_played = max(0, rating.games_played - 1)
-            if part.win:
-                rating.wins = max(0, rating.wins - 1)
+    if game.status != "processed":
+        raise ValueError(f"Match {match_id} is not in processed state (it is '{game.status}').")
+    for part in list(game.participants):
+        mtr = part.metrics or {}
+        o = await session.scalar(select(PlayerRating).where(
+            PlayerRating.player_id == part.player_id, PlayerRating.role == "OVERALL", PlayerRating.season == game.season))
+        rr = await session.scalar(select(PlayerRating).where(
+            PlayerRating.player_id == part.player_id, PlayerRating.role == part.role, PlayerRating.season == game.season))
+        if o and "_overall_before" in mtr:
+            _restore(o, mtr["_overall_before"])
+        elif o:
+            o.lp = max(0, o.lp - part.lp_delta); o.games_played = max(0, o.games_played - 1)
+            if part.win: o.wins = max(0, o.wins - 1)
+        if rr and "_role_before" in mtr:
+            _restore(rr, mtr["_role_before"])
         await session.delete(part)
-
-    game.status = "pending"
+    snap = (game.processing_notes or {}).get("_baselines_before")
+    if snap:
+        for role, d in snap.items():
+            row = await session.scalar(select(RoleBaseline).where(RoleBaseline.role == role, RoleBaseline.season == game.season))
+            if row:
+                row.stats = d
+                row.sample_size = int(d.get("n", 0))
+    game.status = "rolled_back"
     game.processed_at = None
-    await session.flush()
+    await session.commit()
+    return game
 
-    stored_wc = _deserialize_weight_config(game.weight_config)
 
+async def reprocess_match(session: AsyncSession, match_id: str, submitted_by: str) -> ProcessResult:
+    game = await rollback_match(session, match_id)
+    raw = game.raw_riot_data or {}
     return await process_match(
-        session, match_id, submitted_by=submitted_by,
-        lobby_id=game.lobby_id, weight_config=stored_wc,
+        session, match_id, submitted_by=submitted_by, lobby_id=game.lobby_id,
+        match_data=raw.get("match"), timeline_data=raw.get("timeline"), season=game.season,
     )
-
-
-def _serialize_weight_config(wc: dict) -> dict:
-    return {metric: {"w0": cfg["w0"], "alpha": cfg["alpha"]} for metric, cfg in wc.items()}
-
-
-def _deserialize_weight_config(raw: dict | None) -> dict | None:
-    if not raw:
-        return None
-    return {metric: {"w0": v["w0"], "alpha": v["alpha"]} for metric, v in raw.items()}
