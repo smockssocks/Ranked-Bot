@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 
@@ -144,12 +145,69 @@ def _validate() -> None:
         log.info("DRAFTER_API_KEY not set: drafter.lol drafts disabled.")
 
 
+def _friendly(title: str, lines: list[str]) -> None:
+    """Print a readable box instead of a Python traceback for common setup mistakes."""
+    print()
+    print("  " + "=" * 62)
+    print(f"  {title}")
+    print("  " + "=" * 62)
+    for line in lines:
+        print(f"  {line}")
+    print()
+
+
 async def main():
     _validate()
     bot = RankedBot()
-    async with bot:
-        await bot.start(config.DISCORD_TOKEN)
+    try:
+        async with bot:
+            await bot.start(config.DISCORD_TOKEN)
+    except discord.LoginFailure:
+        _friendly("YOUR DISCORD TOKEN IS NOT VALID", [
+            "Discord rejected the token in your .env file.",
+            "",
+            "To get a fresh one:",
+            "  1. Go to https://discord.com/developers/applications",
+            "  2. Click your application, then 'Bot' on the left",
+            "  3. Click 'Reset Token', confirm, then 'Copy'",
+            "  4. Open .env in this folder and paste it after DISCORD_TOKEN=",
+            "     with no spaces and no quotation marks",
+            "  5. Start the bot again",
+        ])
+    except discord.PrivilegedIntentsRequired:
+        _friendly("TWO SWITCHES ARE TURNED OFF IN DISCORD", [
+            "The bot needs two permissions that are off by default.",
+            "",
+            "  1. Go to https://discord.com/developers/applications",
+            "  2. Click your application, then 'Bot' on the left",
+            "  3. Scroll to 'Privileged Gateway Intents'",
+            "  4. Turn ON both of these:",
+            "        SERVER MEMBERS INTENT",
+            "        MESSAGE CONTENT INTENT",
+            "  5. Click 'Save Changes', then start the bot again",
+        ])
+    except (aiohttp.ClientConnectorError, aiohttp.ClientOSError, OSError) as e:
+        _friendly("COULD NOT REACH DISCORD", [
+            "The bot could not connect to Discord's servers.",
+            "",
+            "  - Check that this computer is online",
+            "  - Check that a firewall or antivirus is not blocking Python",
+            "  - If you are on a work or school network, it may block bots",
+            "",
+            f"Technical detail: {e}",
+        ])
+    except discord.HTTPException as e:
+        _friendly("DISCORD REFUSED THE CONNECTION", [
+            f"Discord replied with an error: {e}",
+            "",
+            "If this says 'Forbidden', re-invite the bot to your server using",
+            "the invite link in SETUP-WINDOWS.md, making sure the link ends",
+            "with  scope=bot%20applications.commands",
+        ])
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n  Bot stopped.")

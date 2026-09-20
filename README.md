@@ -14,88 +14,58 @@ you give it an OpenRouter key.
 
 ## 1. Getting it running
 
-### What you need
+### On Windows
 
-| Thing | Where | Required? |
+**Read [SETUP-WINDOWS.md](SETUP-WINDOWS.md).** It is one page, written for someone who has
+never used a terminal, and it ends with you double-clicking a single file.
+
+The short version: install Python from python.org **with the "Add python.exe to PATH" box
+ticked**, download this repository as a ZIP and extract it, then double-click
+**`START-BOT.bat`**. That script builds everything, opens your settings file in Notepad, checks
+your keys, and tells you in plain English about anything that is wrong.
+
+Do not use Docker on Windows. It needs virtualization enabled in your BIOS and is not worth
+the trouble for one bot.
+
+### On Linux or macOS
+
+```bash
+./start.sh
+```
+
+Same idea: it creates the environment, installs dependencies, copies `.env.example` to `.env`
+on first run, checks your settings and starts the bot.
+
+### What you will need either way
+
+| Thing | Where to get it | Required? |
 | --- | --- | --- |
-| A Discord bot token and your server's ID | https://discord.com/developers/applications | yes |
-| A Riot API key | https://developer.riotgames.com | yes (nothing works without it) |
-| Python 3.11+ **or** Docker | | yes (one of them) |
-| A drafter.lol API key | https://drafter.lol (subscription) | optional: draft links |
-| An OpenRouter API key | https://openrouter.ai/keys | optional: chat |
-| Postgres | bundled in `docker-compose.yml` | optional: SQLite works for small servers |
+| Discord bot token | https://discord.com/developers/applications | yes |
+| Your Discord server ID | Right-click your server with Developer Mode on | yes |
+| Riot API key | https://developer.riotgames.com | yes |
+| drafter.lol API key | https://drafter.lol | optional: draft links |
+| OpenRouter API key | https://openrouter.ai/keys | optional: chat |
 
-### Step 1: create the Discord application
+Two things catch everyone out:
 
-1. Go to https://discord.com/developers/applications, **New Application**, give it a name.
-2. **Bot** tab: click **Reset Token**, copy the token. This is `DISCORD_TOKEN`.
-3. Same tab, **Privileged Gateway Intents**: turn on **Server Members Intent** and
-   **Message Content Intent**. The bot will not start without them.
-4. **OAuth2** tab: copy the **Client ID**. Invite the bot with this URL (replace the id):
+- In the Discord developer portal, **Bot** tab, you must turn on **Server Members Intent**
+  and **Message Content Intent**. The bot refuses to start without them.
+- The Riot **development** key on the front page of their site **expires every 24 hours**.
+  For permanent use, click **Register Product** there and apply for a **Personal API Key**.
 
-   ```
-   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applications.commands&permissions=117824
-   ```
+### Checking your setup at any time
 
-   That grants View Channels, Send Messages, Embed Links, Attach Files, Read Message History and
-   Add Reactions. Nothing more is needed.
-5. In Discord, enable Developer Mode (Settings → Advanced), right-click your server → **Copy
-   Server ID**. This is `DISCORD_GUILD_ID`. Setting it makes slash commands appear instantly;
-   without it they take up to an hour.
-
-### Step 2: get a Riot API key
-
-1. Sign in at https://developer.riotgames.com with a Riot account.
-2. The **development key** on the dashboard works immediately but **expires every 24 hours**.
-   Use it to test.
-3. For real use, **Register Product → Personal API key**. Describe the bot honestly (a Discord
-   inhouse bot for a community of N players). Personal keys do not expire and are usually
-   approved in a few days. A Production key is only needed for many servers.
-4. Set `RIOT_REGION` to your server's platform (`na1`, `euw1`, `eun1`, `kr`, `br1`, `oc1`, ...)
-   and `RIOT_PLATFORM` to its routing cluster:
-
-   | `RIOT_PLATFORM` | regions |
-   | --- | --- |
-   | `americas` | na1, br1, la1, la2 |
-   | `europe` | euw1, eun1, tr1, ru, me1 |
-   | `asia` | kr, jp1 |
-   | `sea` | oc1, ph2, sg2, th2, tw2, vn2 |
-
-### Step 3: configure
-
-```bash
-cp .env.example .env
+```
+.venv\Scripts\python.exe tools\preflight.py     (Windows)
+.venv/bin/python tools/preflight.py              (Linux/macOS)
 ```
 
-Open `.env` and fill in at least `DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `RIOT_API_KEY`,
-`RIOT_REGION`, `RIOT_PLATFORM`. Every other setting has a working default and is explained in
-the file.
+That prints a tick or a fix for every requirement, including whether your `RIOT_REGION` and
+`RIOT_PLATFORM` agree with each other, which is a common cause of mysterious 403 errors.
 
-### Step 4a: run with Docker (recommended, includes Postgres)
+### Running it on a server
 
-```bash
-docker compose up -d --build
-docker compose logs -f bot      # watch it come up
-```
-
-That builds the image, starts Postgres, runs the database migrations and starts the bot. Data
-lives in the `pgdata` volume. To update later: `git pull && docker compose up -d --build`.
-
-### Step 4b: run with Python
-
-```bash
-python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python -m bot.main
-```
-
-With the default `DATABASE_URL` the bot uses a local SQLite file (`ranked_bot.db`) and creates
-its tables on first start. That is fine for one community. To use your own Postgres instead,
-set `DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/ranked_bot` and run
-`alembic upgrade head` before the first start.
-
-The bot must keep running to pick up games, so on a server put it behind something that
-restarts it. A minimal systemd unit:
+The bot must stay running to pick up games. On a Linux box:
 
 ```ini
 [Unit]
@@ -112,26 +82,22 @@ User=ranked
 WantedBy=multi-user.target
 ```
 
-### Step 5: first-run checklist in Discord
+SQLite is the default and is fine for one community. For Postgres, set
+`DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/ranked_bot` and run `alembic upgrade head`
+once before the first start. A `Dockerfile` and `docker-compose.yml` are included for anyone who
+prefers containers on a Linux host.
 
-1. Type `/` in any channel: you should see `/link`, `/queue`, `/inhouse`, `/rank`, ... If not,
-   check `DISCORD_GUILD_ID` and the bot logs.
-2. `/admin modchannel #mod-channel` – where smurf flags go. Do this or flags are only logged.
-3. Optional: `/admin resultschannel #results` – results are always posted in the lobby's channel;
-   this adds a second channel.
-4. Everyone runs `/link GameName#TAG` once. A player cannot queue until they have linked; a
-   mod can link someone with `/admin link @user GameName#TAG`.
-5. `/howranked` posts a plain-language explanation of the system you can pin.
+### First things to do in Discord
 
-### Checking that it works
+1. Type `/` in a channel and confirm `/link`, `/queue`, `/inhouse` and `/rank` appear.
+2. `/admin modchannel #mods` so smurf alerts have somewhere to go.
+3. Everyone runs `/link GameName#TAG` once. Nobody can queue before linking.
+4. `/howranked` posts an explanation of the LP system you can pin.
 
-`pytest` runs 53 tests without any network or Discord access. For a live check, run the bot,
-open a lobby with `/inhouse create`, press Join on ten accounts, Start, then play. Or, to test
-the rating pipeline alone, take any finished 10-player custom game and run
-`/admin submit NA1_1234567890` (the match ID is in the client's match history, or on op.gg in
-the URL of a game).
+To test scoring without playing a fresh game, take any past 10-player custom from your match
+history and run `/admin submit NA1_1234567890`.
 
----
+Run the test suite any time with `pytest`. It needs no network, Discord or keys.
 
 ## 2. A game night, step by step
 

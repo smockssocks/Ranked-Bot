@@ -1,0 +1,5 @@
+# Windows launchers must keep CRLF or cmd.exe mishandles labels and goto.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Opened in Notepad by beginners: keep CRLF so it is readable.
+.env.example text eol=crlf
