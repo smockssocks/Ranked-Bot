@@ -324,7 +324,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
     async def inhouse_submit(self, inter: discord.Interaction, match_id: str):
         await inter.response.defer()
         from bot.services.game_processor import process_match
-        from bot.services.riot_api import RiotAPIError, RiotUnavailable
+        from bot.services.riot_api import RiotAPIError, RiotUnavailable, friendly_error
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
             try:
@@ -334,7 +334,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
                 await inter.followup.send(str(e))
                 return
             except (RiotAPIError, RiotUnavailable) as e:
-                await inter.followup.send(f"Riot API error: {e}")
+                await inter.followup.send(friendly_error(e))
                 return
             if lobby and lobby.status == "active" and not result.remake:
                 await lobby_manager.complete_lobby(session, lobby)

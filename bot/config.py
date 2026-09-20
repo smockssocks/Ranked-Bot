@@ -7,7 +7,16 @@ from __future__ import annotations
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# override=True matters: without it, a variable already present in the operating
+# system environment silently wins over the .env file. People who once set
+# RIOT_API_KEY as a Windows environment variable while troubleshooting would then
+# never be able to change the key by editing .env, no matter how many times they
+# restarted. The file is the single source of truth for this bot.
+#
+# Because override=True is aggressive, the test suite sets RANKED_BOT_NO_DOTENV=1
+# so a developer's real .env can never leak into a test run.
+if os.getenv("RANKED_BOT_NO_DOTENV") != "1":
+    load_dotenv(override=True)
 
 
 def _int(name: str, default: int) -> int:

@@ -6,12 +6,15 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 
 # Point the bot at a throwaway sqlite DB before any bot module is imported.
+# Never read the developer's real .env during tests: config.py honours this.
+os.environ["RANKED_BOT_NO_DOTENV"] = "1"
+
 _tmp = tempfile.mkdtemp(prefix="ranked-bot-test-")
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{os.path.join(_tmp, 'test.db')}"
-os.environ.setdefault("DISCORD_TOKEN", "test")
-os.environ.setdefault("RIOT_API_KEY", "")
-os.environ.setdefault("OPENROUTER_API_KEY", "")
-os.environ.setdefault("CHAT_CHANNEL_IDS", "555")
+os.environ["DISCORD_TOKEN"] = "test"
+os.environ["RIOT_API_KEY"] = ""
+os.environ["OPENROUTER_API_KEY"] = ""
+os.environ["CHAT_CHANNEL_IDS"] = "555"
 
 import pytest  # noqa: E402
 

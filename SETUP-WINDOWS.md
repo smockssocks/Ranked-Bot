@@ -166,9 +166,24 @@ Windows Settings → search "Manage app execution aliases" → turn off `python.
 Almost always antivirus or a dropped connection. Delete the `.venv` folder inside the bot
 folder and run `START-BOT.bat` again.
 
-**Riot API 403 errors when someone runs `/link`.**
-Your development key expired. They last 24 hours. Get a fresh one from
-developer.riotgames.com, paste it into `.env`, save, and restart the bot.
+**"Unknown apikey" or any Riot key error when someone runs `/link`.**
+
+**Double-click `CHECK-RIOT-KEY.bat`.** It tests your key against Riot directly and
+tells you exactly which of these it is. In order of how often it happens:
+
+1. **You did not restart the bot.** The key is read once, when the bot starts.
+   Editing `.env` while it is running changes nothing. Close the black window
+   completely, then run `START-BOT.bat` again.
+2. **The key was copied incompletely.** A Riot key is exactly 42 characters:
+   `RGAPI-` followed by 36 more. The checker tells you how many you actually have.
+3. **The key expired.** Development keys die after 24 hours. Get a fresh one from
+   developer.riotgames.com, paste it in, and restart.
+4. **A leftover Windows environment variable is overriding your file.** If you ever
+   set `RIOT_API_KEY` as a system environment variable, it used to silently beat
+   whatever was in `.env`. The bot now always prefers `.env`, but the checker will
+   still spot the stray variable and tell you how to delete it.
+
+Anything you change in `.env` needs a bot restart to take effect. Every time.
 
 **Riot API 404 when someone runs `/link`.**
 Typo in the Riot ID. It must be `GameName#TAG`, exactly as it appears in the League client.

@@ -38,7 +38,38 @@ class RiotUnavailable(Exception):
 class RiotAPIError(Exception):
     def __init__(self, status: int, message: str):
         self.status = status
+        self.body = message
         super().__init__(f"Riot API {status}: {message}")
+
+
+def friendly_error(e: Exception) -> str:
+    """Turn a Riot failure into something a server admin can actually act on."""
+    if isinstance(e, RiotUnavailable):
+        return ("The bot has no Riot API key configured. An admin needs to put one in the "
+                "`.env` file and restart the bot.")
+    if not isinstance(e, RiotAPIError):
+        return f"Unexpected error talking to Riot: {e}"
+    body = (getattr(e, "body", "") or "").lower()
+    if e.status in (401, 403):
+        if "unknown" in body:
+            return ("**Riot rejected the bot's API key.**\n"
+                    "Admin: this usually means the bot was not restarted after the key was "
+                    "changed, or the key was copied incompletely. Stop the bot, run "
+                    "`tools/check_riot_key.py` (or CHECK-RIOT-KEY.bat on Windows) to see "
+                    "exactly what is wrong, then start it again.")
+        return ("**The bot's Riot API key has expired.**\n"
+                "Admin: development keys last only 24 hours. Get a fresh key at "
+                "https://developer.riotgames.com, paste it into `.env`, and restart the bot. "
+                "Apply for a Personal API Key there to stop this happening daily.")
+    if e.status == 404:
+        return ("That Riot ID does not exist. Check the spelling and remember it is "
+                "`GameName#TAG`, exactly as shown in the League client. The tag is the part "
+                "after the `#`, and it is not always your region.")
+    if e.status == 429:
+        return "Riot is rate limiting the bot. Wait a minute and try again."
+    if e.status >= 500:
+        return "Riot's API is having problems right now. Try again in a few minutes."
+    return f"Riot API error {e.status}. Details: {getattr(e, 'body', '')[:200]}"
 
 
 class RiotClient:

@@ -13,7 +13,7 @@ from bot.models.player import Player
 from bot.models.rating import PlayerRating, RoleBaseline
 from bot.services import settings, smurf_detector
 from bot.services.game_processor import get_or_create_rating, process_match, reprocess_match, rollback_match
-from bot.services.riot_api import RiotAPIError, RiotClient, RiotUnavailable
+from bot.services.riot_api import RiotAPIError, RiotClient, RiotUnavailable, friendly_error
 from bot.ui import embeds
 
 
@@ -65,10 +65,8 @@ class AdminCog(commands.Cog, name="Admin"):
                 p, flag = await link_account(session, inter.user, riot_id)
             except ValueError as e:
                 await inter.followup.send(str(e)); return
-            except RiotAPIError as e:
-                await inter.followup.send(f"Riot API error: {e}"); return
-            except RiotUnavailable:
-                await inter.followup.send("The bot has no Riot API key configured yet."); return
+            except (RiotAPIError, RiotUnavailable) as e:
+                await inter.followup.send(friendly_error(e)); return
         await inter.followup.send(f"Linked **{p.summoner_name}**. You can `/queue` now. First {config.PLACEMENT_GAMES} games are placements.")
         mod = self.bot.get_cog("Moderation")
         if flag and mod:
@@ -85,7 +83,7 @@ class AdminCog(commands.Cog, name="Admin"):
             except ValueError as e:
                 await inter.followup.send(str(e)); return
             except (RiotAPIError, RiotUnavailable) as e:
-                await inter.followup.send(f"Riot API error: {e}"); return
+                await inter.followup.send(friendly_error(e)); return
         await inter.followup.send(f"Linked **{member.display_name}** to **{p.summoner_name}**.")
         mod = self.bot.get_cog("Moderation")
         if flag and mod:
@@ -111,7 +109,7 @@ class AdminCog(commands.Cog, name="Admin"):
             except ValueError as e:
                 await inter.followup.send(str(e)); return
             except (RiotAPIError, RiotUnavailable) as e:
-                await inter.followup.send(f"Riot API error: {e}"); return
+                await inter.followup.send(friendly_error(e)); return
         await inter.followup.send(embed=embeds.results_embed(result))
         mod = self.bot.get_cog("Moderation")
         if mod and result.smurf_flags:
