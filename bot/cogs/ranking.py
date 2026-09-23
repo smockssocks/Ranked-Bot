@@ -10,6 +10,7 @@ from bot.db.database import SessionLocal
 from bot.models.game import Game, GameParticipant
 from bot.models.player import Player
 from bot.models.rating import PlayerRating
+from bot.services import settings
 from bot.services.ranks import division_for_lp, tier_for_lp
 from bot.services.rating_engine import ROLE_DISPLAY
 from bot.ui import embeds
@@ -132,6 +133,54 @@ class RankingCog(commands.Cog, name="Ranking"):
                                        f"CS {m.get('cs_per_min', 0):.1f}/min", inline=False)
         e.set_footer(text=f"Match {game.riot_match_id} • z = standard deviations vs role average on this server")
         await inter.followup.send(embed=e)
+
+    @app_commands.command(name="help", description="How to play inhouses here: setup, joining a queue, and every command.")
+    async def help_cmd(self, inter: discord.Interaction):
+        await inter.response.defer(ephemeral=True)
+        where = "this server"
+        async with SessionLocal() as session:
+            p = await _player(session, inter.user)
+            if inter.guild_id:
+                qc = await settings.queue_channel_id(session, str(inter.guild_id))
+                if qc:
+                    where = f"<#{qc}>"
+
+        linked = bool(p and p.riot_puuid)
+        step1 = ("~~**1. Link your Riot account**~~ ✅ done" if linked else
+                 "**1. Link your Riot account**\n"
+                 "Run `/link` with your full Riot ID, for example `/link Danman#NA1`.\n"
+                 "That is the name and tag shown in the League client. You only do this once, "
+                 "and you cannot join a queue until you have.")
+
+        e = discord.Embed(
+            title="How to play inhouses",
+            description=f"Queues happen in {where}.",
+            color=discord.Color.blurple(),
+        )
+        e.add_field(name="Getting started", value=step1, inline=False)
+        e.add_field(
+            name="2. Join the queue",
+            value=(f"When someone opens a lobby in {where}, press the green **Join** button.\n"
+                   "Prefer a role? Use `/queue role:Mid secondary:Top` instead. The bot tries hard "
+                   "to give everyone their role.\n"
+                   "Changed your mind? Press **Leave** or run `/dequeue`."),
+            inline=False)
+        e.add_field(
+            name="3. Play",
+            value=("At 10 players the host starts it and the bot posts the teams and your roles.\n"
+                   "Join the custom game, play it out. You do not need to report anything: the bot "
+                   "finds the game and posts everyone's LP changes within a couple of minutes."),
+            inline=False)
+        e.add_field(
+            name="Your rank",
+            value=("`/rank` your tier, LP, record and per-role stats\n"
+                   "`/history` your recent games\n"
+                   "`/explain` exactly why your last game gained or lost LP\n"
+                   "`/leaderboard` the ladder, or `/leaderboard role:Jungle`\n"
+                   "`/howranked` how the whole system works"),
+            inline=False)
+        e.set_footer(text="Win or lose matters most, but playing well still counts. Carry a loss and you barely drop.")
+        await inter.followup.send(embed=e, ephemeral=True)
 
     @app_commands.command(name="howranked", description="How the ranking works.")
     async def howranked(self, inter: discord.Interaction):

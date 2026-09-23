@@ -47,6 +47,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 DISCORD_GUILD_ID = _int("DISCORD_GUILD_ID", 0)
 MOD_CHANNEL_ID = _int("MOD_CHANNEL_ID", 0)          # smurf flags / alerts go here
 RESULTS_CHANNEL_ID = _int("RESULTS_CHANNEL_ID", 0)  # optional: post-game summaries
+QUEUE_CHANNEL_ID = _int("QUEUE_CHANNEL_ID", 0)      # lock inhouse queues to one channel
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
 # --- Riot ------------------------------------------------------------------

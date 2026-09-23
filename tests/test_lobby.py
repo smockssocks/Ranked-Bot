@@ -132,3 +132,26 @@ async def test_auto_detect_poll_processes_lobby_game(db, monkeypatch):
         fresh = await session.get(Lobby, lobby.id)
         assert fresh.status == "completed"
     assert await auto_detect.poll_once(db) == []   # nothing active anymore
+
+
+# --- queue channel restriction -------------------------------------------
+
+def test_wrong_channel_message_pure():
+    from bot.services.settings import wrong_channel_message as w
+    assert w(0, 999) is None              # not configured: allowed anywhere
+    assert w(123, 123) is None            # right channel
+    msg = w(123, 999)                     # wrong channel
+    assert msg is not None and "<#123>" in msg
+    assert "/rank" in msg                 # tells them what still works elsewhere
+
+
+async def test_queue_channel_setting_roundtrip(db):
+    from bot.services import settings
+    async with db() as session:
+        assert await settings.queue_channel_id(session, "g") == 0          # default: anywhere
+        await settings.set_setting(session, "g", settings.KEY_QUEUE_CHANNEL, "555")
+        assert await settings.queue_channel_id(session, "g") == 555
+        assert settings.wrong_channel_message(555, 555) is None
+        assert settings.wrong_channel_message(555, 42) is not None
+        await settings.set_setting(session, "g", settings.KEY_QUEUE_CHANNEL, "")   # cleared
+        assert await settings.queue_channel_id(session, "g") == 0

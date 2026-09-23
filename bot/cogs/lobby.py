@@ -10,7 +10,7 @@ from sqlalchemy import select
 from bot import config
 from bot.db.database import SessionLocal
 from bot.models.player import Player
-from bot.services import drafter_api, lobby_manager
+from bot.services import drafter_api, lobby_manager, settings
 from bot.services.lobby_manager import LobbyError
 from bot.services.rating_engine import ROLES, ROLE_DISPLAY
 from bot.ui import embeds
@@ -60,6 +60,24 @@ class LobbyCog(commands.Cog, name="Lobby"):
     async def cog_load(self):
         self.bot.add_view(LobbyView(self))
 
+    async def _wrong_channel(self, inter: discord.Interaction) -> bool:
+        """
+        When a queue channel is configured, inhouse commands only work there.
+        Replies privately pointing at the right channel and returns True if refused.
+        """
+        if inter.guild_id is None:
+            return False
+        async with SessionLocal() as session:
+            qc = await settings.queue_channel_id(session, str(inter.guild_id))
+        msg = settings.wrong_channel_message(qc, inter.channel_id or 0)
+        if msg is None:
+            return False
+        if inter.response.is_done():
+            await inter.followup.send(msg, ephemeral=True)
+        else:
+            await inter.response.send_message(msg, ephemeral=True)
+        return True
+
     # ------------------------------------------------------------------ #
     # shared handlers                                                      #
     # ------------------------------------------------------------------ #
@@ -80,6 +98,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
             log.warning("could not refresh lobby message: %s", e)
 
     async def handle_join(self, inter: discord.Interaction, role: str | None, secondary: str | None):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer(ephemeral=True)
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
@@ -100,6 +120,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
                     await channel.send(f"**Lobby #{lobby.id} is full!** <@{lobby.host_discord_id}> press **Start** or run `/inhouse start`.")
 
     async def handle_leave(self, inter: discord.Interaction):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer(ephemeral=True)
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
@@ -115,6 +137,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
             await self.refresh_lobby_message(session, lobby)
 
     async def handle_start(self, inter: discord.Interaction, random_captains: bool = False):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer()
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
@@ -196,6 +220,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
         app_commands.Choice(name="Pick order (balanced teams, roles first-come-first-serve)", value="pick_order"),
     ])
     async def inhouse_create(self, inter: discord.Interaction, mode: app_commands.Choice[str] | None = None):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer()
         async with SessionLocal() as session:
             try:
@@ -215,6 +241,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
 
     @inhouse.command(name="pick", description="Captain: pick a player for your team.")
     async def inhouse_pick(self, inter: discord.Interaction, player: discord.Member):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer()
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
@@ -241,6 +269,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
     @inhouse.command(name="role", description="Captain/host: move a teammate to a role (swaps if taken).")
     @app_commands.choices(role=ROLE_CHOICES)
     async def inhouse_role(self, inter: discord.Interaction, player: discord.Member, role: app_commands.Choice[str]):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer()
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
@@ -257,6 +287,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
 
     @inhouse.command(name="teams", description="Show the current teams.")
     async def inhouse_teams(self, inter: discord.Interaction):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer()
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
@@ -269,6 +301,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
     @inhouse.command(name="draft", description="Create (or re-create) a drafter.lol draft for the current teams.")
     @app_commands.describe(fearless="Fearless draft", games="Number of games in the series (1-5)")
     async def inhouse_draft(self, inter: discord.Interaction, fearless: bool = False, games: int = 1):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer()
         if not drafter_api.is_configured():
             await inter.followup.send("drafter.lol is not configured (set DRAFTER_API_KEY).")
@@ -294,6 +328,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
 
     @inhouse.command(name="status", description="Show the current lobby.")
     async def inhouse_status(self, inter: discord.Interaction):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer()
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
@@ -305,6 +341,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
 
     @inhouse.command(name="cancel", description="Cancel the current lobby (host/admin).")
     async def inhouse_cancel(self, inter: discord.Interaction):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer(ephemeral=True)
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
@@ -322,6 +360,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
     @inhouse.command(name="submit", description="Submit a finished match by Riot match ID (if auto-detect missed it).")
     @app_commands.describe(match_id="e.g. NA1_1234567890")
     async def inhouse_submit(self, inter: discord.Interaction, match_id: str):
+        if await self._wrong_channel(inter):
+            return
         await inter.response.defer()
         from bot.services.game_processor import process_match
         from bot.services.riot_api import RiotAPIError, RiotUnavailable, friendly_error

@@ -153,6 +153,32 @@ class AdminCog(commands.Cog, name="Admin"):
             await settings.set_setting(session, str(inter.guild_id), settings.KEY_MOD_CHANNEL, str(channel.id))
         await inter.response.send_message(f"Mod alerts will go to {channel.mention}.", ephemeral=True)
 
+    @admin.command(name="queuechannel", description="Lock inhouse queues to ONE channel (recommended).")
+    @app_commands.describe(channel="The channel queues live in. Leave empty to see the current setting.",
+                           clear="Set to True to allow queues in any channel again.")
+    async def admin_queuechannel(self, inter: discord.Interaction, channel: discord.TextChannel | None = None,
+                                 clear: bool = False):
+        async with SessionLocal() as session:
+            if clear:
+                await settings.set_setting(session, str(inter.guild_id), settings.KEY_QUEUE_CHANNEL, "")
+                await inter.response.send_message(
+                    "Inhouse queues can now be opened in **any** channel.", ephemeral=True)
+                return
+            if channel is None:
+                current = await settings.queue_channel_id(session, str(inter.guild_id))
+                msg = (f"Inhouse queues are locked to <#{current}>." if current
+                       else "Inhouse queues are not locked to a channel yet.\n"
+                            "Run `/admin queuechannel channel:#your-channel` to lock them.")
+                await inter.response.send_message(msg, ephemeral=True)
+                return
+            await settings.set_setting(session, str(inter.guild_id), settings.KEY_QUEUE_CHANNEL, str(channel.id))
+        await inter.response.send_message(
+            f"Inhouse queues are now locked to {channel.mention}.\n"
+            f"Every `/queue`, `/inhouse` and lobby button only works there. Anyone who tries "
+            f"elsewhere gets a private nudge pointing at it.\n\n"
+            f"Next: go to {channel.mention} and run `/inhouse create` to post the lobby panel.",
+            ephemeral=True)
+
     @admin.command(name="resultschannel", description="Where auto-detected game results are posted (default: lobby channel).")
     async def admin_resultschannel(self, inter: discord.Interaction, channel: discord.TextChannel):
         async with SessionLocal() as session:

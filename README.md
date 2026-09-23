@@ -90,9 +90,11 @@ prefers containers on a Linux host.
 ### First things to do in Discord
 
 1. Type `/` in a channel and confirm `/link`, `/queue`, `/inhouse` and `/rank` appear.
-2. `/admin modchannel #mods` so smurf alerts have somewhere to go.
-3. Everyone runs `/link GameName#TAG` once. Nobody can queue before linking.
-4. `/howranked` posts an explanation of the LP system you can pin.
+2. `/admin queuechannel channel:#inhouse-queue` so all queueing happens in one place.
+3. `/admin modchannel #mods` so smurf alerts have somewhere to go.
+4. Everyone runs `/link GameName#TAG` once. Nobody can queue before linking.
+5. Pin the player message from [docs/PLAYER-GUIDE.md](docs/PLAYER-GUIDE.md). Players can also
+   run `/help` at any time, which tells them what to do next and where your queue channel is.
 
 To test scoring without playing a fresh game, take any past 10-player custom from your match
 history and run `/admin submit NA1_1234567890`.
@@ -151,6 +153,7 @@ judged against your lane opponent and your role, never your champion.
 ### Player commands
 | Command | What |
 | --- | --- |
+| `/help` | Everything a player needs: whether they have linked, which channel to queue in, and the commands. |
 | `/rank [@player]` | Tier, LP, record, streak, peak, average performance, consistency, confidence, per-role LP, last 10 results. |
 | `/leaderboard [role]` | Top 15 overall or for one role. Placements marked. |
 | `/history [@player]` | Last 8 games with LP before/after. |
@@ -206,6 +209,7 @@ knows about you. `CHAT_PERSONA` in `.env` changes its personality.
 | `/admin rollback MATCH_ID` | Undo a game exactly (restores every rating and the learned baselines). |
 | `/admin reprocess MATCH_ID` | Rollback + process again (after tuning the model). Most recent games only. |
 | `/admin reset @player` | Back to 1000 LP and placements. |
+| `/admin queuechannel` | Lock every queue command and lobby button to one channel. Run it with no options to see the current setting, or `clear:True` to allow any channel. |
 | `/admin modchannel`, `/admin resultschannel` | Channels. |
 | `/admin baselines` | What the server currently considers average per role. |
 | `/admin season` | Seasons: change `CURRENT_SEASON` in `.env` and restart for a fresh ladder; old seasons stay in the database. |
