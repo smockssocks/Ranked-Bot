@@ -432,3 +432,51 @@ def expected_perf_for_mmr(mmr: float) -> float:
     Used by the anti-smurf detector to spot newcomers who wildly exceed it.
     """
     return max(-1.5, min(1.5, (mmr - 1500.0) / 400.0 * 0.5))
+
+
+# --------------------------------------------------------------------------- #
+# Versatility                                                                 #
+# --------------------------------------------------------------------------- #
+# A visible measure of all-round skill. It is deliberately NOT added to LP: in
+# pick order lobbies players are regularly forced off their main role, and since
+# performance is scored against role averages, LP already rewards players who are
+# good everywhere. A separate LP bonus would double-count that and be farmable.
+
+VERSATILITY_PRIOR = -0.25       # assumed PS in a role you have not shown us (slightly below average)
+VERSATILITY_PRIOR_GAMES = 4.0   # games of evidence needed before a role counts at about half weight
+PROVEN_GAMES = 3                # games in a role before we call it "proven"
+VERSATILITY_WEAKEST_WEIGHT = 0.4
+
+
+@dataclass
+class Versatility:
+    score: float                  # higher = better all-round player
+    per_role: dict[str, float]    # evidence-weighted PS estimate per role
+    games: dict[str, int]
+    proven: int                   # roles with at least PROVEN_GAMES games
+    weakest: list[str]            # the two roles holding the score down
+
+
+def versatility(role_stats: dict[str, tuple[int, float]]) -> Versatility:
+    """
+    role_stats: {role: (games_played, average_performance_score)}.
+
+    Each role's estimate is shrunk toward VERSATILITY_PRIOR by how little we have
+    seen of it, so one lucky game on support is not "proven support". The score
+    is 60% the average across all five roles and 40% the average of the weakest
+    two, so a genuine hole in someone's game pulls them down: the point is to be
+    good at every role, not great at one.
+    """
+    est: dict[str, float] = {}
+    games: dict[str, int] = {}
+    for role in ROLES:
+        n, mean = role_stats.get(role, (0, 0.0))
+        n = max(0, int(n))
+        games[role] = n
+        est[role] = (n * mean + VERSATILITY_PRIOR_GAMES * VERSATILITY_PRIOR) / (n + VERSATILITY_PRIOR_GAMES)
+    ordered = sorted(ROLES, key=lambda r: est[r])
+    avg_all = sum(est.values()) / len(ROLES)
+    avg_weak = (est[ordered[0]] + est[ordered[1]]) / 2
+    score = (1 - VERSATILITY_WEAKEST_WEIGHT) * avg_all + VERSATILITY_WEAKEST_WEIGHT * avg_weak
+    proven = sum(1 for r in ROLES if games[r] >= PROVEN_GAMES)
+    return Versatility(score=score, per_role=est, games=games, proven=proven, weakest=ordered[:2])

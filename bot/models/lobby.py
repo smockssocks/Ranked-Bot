@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Integer, DateTime, ForeignKey, JSON, UniqueConstraint, func
+from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, JSON, UniqueConstraint, func, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from bot.db.database import Base
 
@@ -12,7 +12,9 @@ class Lobby(Base):
     channel_id: Mapped[str] = mapped_column(String(32), nullable=False)
     message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     host_discord_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    mode: Mapped[str] = mapped_column(String(16), server_default="captain")  # captain / balanced / pick_order
+    mode: Mapped[str] = mapped_column(String(16), server_default="pick_order")  # pick_order / balanced / captain
+    # False = casual: results are posted but nobody's LP, baselines or smurf checks are touched.
+    ranked: Mapped[bool] = mapped_column(Boolean, server_default=true(), default=True)
     status: Mapped[str] = mapped_column(String(16), server_default="waiting")
     # waiting / drafting / active / completed / cancelled
     max_players: Mapped[int] = mapped_column(Integer, server_default="10")
@@ -44,6 +46,8 @@ class LobbyPlayer(Base):
     secondary_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     team: Mapped[int | None] = mapped_column(Integer, nullable=True)
     assigned_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # pick_order mode: champ-select pick position 1-5 within the team.
+    # captain mode: the draft pick index (-1 for captains). Only compare within one mode.
     pick_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

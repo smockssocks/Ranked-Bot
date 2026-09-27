@@ -8,9 +8,10 @@ import discord
 from bot import config
 from bot.models.lobby import Lobby
 from bot.services import lobby_manager
+from bot.services.settings import MODE_NAMES
 from bot.services.game_processor import ProcessResult
 from bot.services.ranks import division_for_lp, progress_bar, tier_for_lp
-from bot.services.rating_engine import ROLE_DISPLAY
+from bot.services.rating_engine import ROLE_DISPLAY, PROVEN_GAMES, versatility
 
 METRIC_LABELS = {
     "gold_diff_10": "gold lead @10", "gold_diff_15": "gold lead @15", "xp_diff_10": "XP lead @10",
@@ -30,8 +31,9 @@ def label(metric: str) -> str:
 def lobby_embed(lobby: Lobby, names: dict[int, str], host_mention: str) -> discord.Embed:
     n = len(lobby.players)
     color = discord.Color.green() if n >= lobby.max_players else discord.Color.blue()
+    kind = "Ranked" if getattr(lobby, "ranked", True) else "Casual, no LP"
     e = discord.Embed(title=f"Inhouse Lobby #{lobby.id}", color=color)
-    e.add_field(name="Mode", value=lobby.mode.replace("_", " "), inline=True)
+    e.add_field(name="Mode", value=f"{MODE_NAMES.get(lobby.mode, lobby.mode)} • {kind}", inline=True)
     e.add_field(name="Players", value=f"{n}/{lobby.max_players}", inline=True)
     e.add_field(name="Status", value=lobby.status, inline=True)
     if lobby.players:
@@ -39,7 +41,7 @@ def lobby_embed(lobby: Lobby, names: dict[int, str], host_mention: str) -> disco
         for i, lp in enumerate(sorted(lobby.players, key=lambda x: (x.joined_at is None, (x.joined_at.replace(tzinfo=timezone.utc) if x.joined_at and not x.joined_at.tzinfo else x.joined_at) or datetime.min.replace(tzinfo=timezone.utc))), 1):
             pref = ROLE_DISPLAY.get(lp.preferred_role or "", "")
             sec = ROLE_DISPLAY.get(lp.secondary_role or "", "")
-            role_str = f" ({pref}{'/' + sec if sec else ''})" if pref else ""
+            role_str = f" ({pref}{'/' + sec if sec else ''})" if pref and lobby.mode != "pick_order" else ""
             lines.append(f"{i}. {names.get(lp.player_id, '?')}{role_str}")
         e.add_field(name="Queue", value="\n".join(lines), inline=False)
     else:
@@ -51,9 +53,10 @@ def lobby_embed(lobby: Lobby, names: dict[int, str], host_mention: str) -> disco
 def teams_embed(lobby: Lobby, names: dict[int, str], ratings: dict[int, dict] | None = None) -> discord.Embed:
     t1 = [lp for lp in lobby.players if lp.team == 1]
     t2 = [lp for lp in lobby.players if lp.team == 2]
-    e = discord.Embed(title=f"Teams — Lobby #{lobby.id}", color=discord.Color.green())
-    e.add_field(name=lobby.team1_name or "Blue side", value="\n".join(lobby_manager.team_lines(t1, names)) or "—", inline=True)
-    e.add_field(name=lobby.team2_name or "Red side", value="\n".join(lobby_manager.team_lines(t2, names)) or "—", inline=True)
+    title = f"Teams — Lobby #{lobby.id}" + ("" if getattr(lobby, "ranked", True) else " (casual)")
+    e = discord.Embed(title=title, color=discord.Color.green())
+    e.add_field(name=lobby.team1_name or "Blue side", value="\n".join(lobby_manager.team_lines(t1, names, lobby.mode)) or "—", inline=True)
+    e.add_field(name=lobby.team2_name or "Red side", value="\n".join(lobby_manager.team_lines(t2, names, lobby.mode)) or "—", inline=True)
     if ratings:
         m1 = sum(ratings[lp.player_id]["mmr"] for lp in t1) / max(1, len(t1))
         m2 = sum(ratings[lp.player_id]["mmr"] for lp in t2) / max(1, len(t2))
@@ -66,7 +69,10 @@ def teams_embed(lobby: Lobby, names: dict[int, str], ratings: dict[int, dict] | 
         e.add_field(name="Draft (drafter.lol)", value=" • ".join(parts), inline=False)
     if lobby.tournament_code:
         e.add_field(name="Tournament code", value=f"`{lobby.tournament_code}`", inline=False)
-    e.set_footer(text="Play the custom game; results are picked up automatically. Captains: /inhouse role to move players.")
+    if lobby.mode == "pick_order":
+        e.set_footer(text="Pick 1 calls their role first in champ select. Results are picked up automatically.")
+    else:
+        e.set_footer(text="Play the custom game; results are picked up automatically. Captains: /inhouse role to move players.")
     return e
 
 
@@ -77,7 +83,9 @@ def results_embed(result: ProcessResult) -> discord.Embed:
                              description="Game was too short; no LP changes.", color=discord.Color.light_grey())
     mins = (g.game_duration_secs or 0) // 60
     winner = "Blue" if g.winner_team == 1 else "Red"
-    e = discord.Embed(title=f"{winner} side wins — {mins} min", color=discord.Color.blue() if g.winner_team == 1 else discord.Color.red())
+    casual = g.status == "casual"
+    title = f"{winner} side wins — {mins} min" + (" (casual)" if casual else "")
+    e = discord.Embed(title=title, color=discord.Color.blue() if g.winner_team == 1 else discord.Color.red())
     e.description = f"Match `{g.riot_match_id}` • Blue was expected to win {100*(g.team1_expected_win or 0.5):.0f}%"
     for team in (1, 2):
         rows = sorted([r for r in result.results if r.team == team],
@@ -86,8 +94,9 @@ def results_embed(result: ProcessResult) -> discord.Embed:
         for r in rows:
             sign = "+" if r.lp_delta >= 0 else ""
             tag = " (placement)" if r.placement else ""
+            lp_txt = "" if casual else f" • **{sign}{r.lp_delta} LP**{tag}"
             lines.append(f"**{r.player.discord_username}** {ROLE_DISPLAY.get(r.role, r.role)} {r.champion} {r.kda} "
-                         f"• PS {r.perf_score:+.1f} • **{sign}{r.lp_delta} LP**{tag}")
+                         f"• PS {r.perf_score:+.1f}{lp_txt}")
         e.add_field(name=("Blue side" if team == 1 else "Red side") + (" ✅" if g.winner_team == team else ""),
                     value="\n".join(lines) or "—", inline=False)
     mvp = max(result.results, key=lambda r: r.perf_score, default=None)
@@ -96,8 +105,16 @@ def results_embed(result: ProcessResult) -> discord.Embed:
                                       f"{', '.join(label(m) for m in mvp.top_positive) or 'all-round'})", inline=False)
     if result.unlinked:
         e.add_field(name="Unlinked accounts (no LP)", value=", ".join(result.unlinked), inline=False)
-    e.set_footer(text="PS = performance score vs lane opponent and role averages. /explain shows your breakdown.")
+    if casual:
+        e.set_footer(text="Casual game: stats recorded, nobody's LP changed.")
+    else:
+        e.set_footer(text="PS = performance score vs lane opponent and role averages. /explain shows your breakdown.")
     return e
+
+
+def versatility_of(role_rows: list):
+    """Versatility from a player's per-role PlayerRating rows."""
+    return versatility({r.role: (r.games_played, r.perf_mean) for r in role_rows if r.role != "OVERALL"})
 
 
 def rank_embed(name: str, overall, role_rows: list, summoner: str | None, recent: list) -> discord.Embed:
@@ -118,11 +135,18 @@ def rank_embed(name: str, overall, role_rows: list, summoner: str | None, recent
     e.add_field(name="Avg performance", value=f"{overall.perf_mean:+.2f} PS", inline=True)
     e.add_field(name="Consistency", value=f"{consistency_score(overall.perf_var)*100:.0f}%", inline=True)
     e.add_field(name="Confidence", value=f"{max(0, 100 - int(overall.rd / 3.5))}%", inline=True)
-    if role_rows:
-        lines = [f"**{ROLE_DISPLAY.get(r.role, r.role)}** {r.lp} LP • {r.games_played}G • {r.perf_mean:+.2f} PS"
-                 for r in sorted(role_rows, key=lambda r: -r.games_played) if r.games_played]
-        if lines:
-            e.add_field(name="By role", value="\n".join(lines), inline=False)
+    v = versatility_of(role_rows)
+    e.add_field(name="Versatility",
+                value=f"**{v.score:+.2f}** • {v.proven}/5 roles proven", inline=True)
+    grid = []
+    for role in ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"):
+        g = v.games[role]
+        if g == 0:
+            grid.append(f"`{ROLE_DISPLAY[role]:<7}` not played yet")
+        else:
+            mark = "✅" if g >= PROVEN_GAMES else "·"
+            grid.append(f"`{ROLE_DISPLAY[role]:<7}` {v.per_role[role]:+.2f} • {g}G {mark}")
+    e.add_field(name="By role (performance vs role average)", value="\n".join(grid), inline=False)
     if recent:
         e.add_field(name="Recent", value=" ".join("🟩" if p.win else "🟥" for p in recent), inline=False)
     if summoner:

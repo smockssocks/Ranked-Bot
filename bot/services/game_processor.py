@@ -152,13 +152,18 @@ async def process_match(
     match_data: dict | None = None,
     timeline_data: dict | None = None,
     season: int | None = None,
+    ranked: bool = True,
 ) -> ProcessResult:
+    """
+    ranked=False is a casual game: stats and performance scores are computed and
+    posted, but no rating, LP, community baseline or anti-smurf check is touched.
+    """
     season = season or config.CURRENT_SEASON
     now = datetime.now(timezone.utc)
 
     existing = await session.scalar(select(Game).where(Game.riot_match_id == match_id))
     if existing:
-        if existing.status in ("processed", "remake"):
+        if existing.status in ("processed", "remake", "casual"):
             raise ValueError(f"Match {match_id} has already been processed.")
         game = existing
         game.lobby_id = game.lobby_id or lobby_id
@@ -212,6 +217,9 @@ async def process_match(
     perf: dict[str, re_.PerfResult] = {}
     for puuid, m in all_metrics.items():
         perf[puuid] = re_.performance_score(m, m["role"], baselines[m["role"]][1], pools, duration_mins)
+
+    if not ranked:
+        return await _record_casual(session, game, result, all_metrics, perf, season, now, duration_mins)
 
     # 2. link players / ratings
     linked: dict[str, Player] = {}
@@ -308,6 +316,50 @@ async def process_match(
             log.exception("smurf detector failed for %s", match_id)
 
     log.info("Processed %s: %d linked, %d unlinked", match_id, len(linked), len(result.unlinked))
+    return result
+
+
+async def _record_casual(session: AsyncSession, game: Game, result: ProcessResult,
+                         all_metrics: dict[str, dict[str, Any]], perf: dict[str, re_.PerfResult],
+                         season: int, now: datetime, duration_mins: float) -> ProcessResult:
+    """Casual game: keep the stats, post them, change nobody's rating."""
+    team_ps = {t: [perf[pu].score for pu, m in all_metrics.items() if m["team"] == t] for t in (1, 2)}
+    for puuid, m in all_metrics.items():
+        p = await session.scalar(select(Player).where(Player.riot_puuid == puuid))
+        if p is None:
+            result.unlinked.append(m["riot_id"])
+            continue
+        pr = perf[puuid]
+        mates = team_ps[m["team"]]
+        carry = pr.score - sum(mates) / len(mates)
+        o = await session.scalar(select(PlayerRating).where(
+            PlayerRating.player_id == p.id, PlayerRating.role == "OVERALL", PlayerRating.season == season))
+        lp_now = o.lp if o else config.STARTING_LP
+        stored = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in m.items()}
+        stored["_z"] = {k: round(v, 3) for k, v in pr.z.items()}
+        stored["_contrib"] = {k: round(v, 3) for k, v in pr.contributions.items()}
+        explanation = "Casual game: stats recorded, no LP change."
+        session.add(GameParticipant(
+            game_id=game.id, player_id=p.id, team=m["team"], role=m["role"],
+            champion_id=m["champion_id"], champion_name=m["champion_name"], win=m["win"],
+            kills=m["kills"], deaths=m["deaths"], assists=m["assists"], cs_total=m["cs_total"],
+            vision_score=m["vision_score"], damage_dealt=m["damage_dealt"], gold_earned=m["gold_earned"],
+            impact_score=pr.score, carry_factor=carry, metrics=stored, explanation=explanation,
+            lp_before=lp_now, lp_after=lp_now, lp_delta=0,
+            mmr_before=o.mmr if o else config.STARTING_MMR, mmr_after=o.mmr if o else config.STARTING_MMR,
+            rd_before=o.rd if o else config.STARTING_RD, rd_after=o.rd if o else config.STARTING_RD,
+        ))
+        result.results.append(PlayerResult(
+            player=p, role=m["role"], team=m["team"], won=m["win"], champion=m["champion_name"] or "?",
+            kda=f"{m['kills']}/{m['deaths']}/{m['assists']}", perf_score=pr.score, carry_factor=carry,
+            lp_before=lp_now, lp_after=lp_now, lp_delta=0, explanation=explanation,
+            top_positive=pr.top_positive, top_negative=pr.top_negative, placement=False,
+        ))
+    game.status = "casual"
+    game.processed_at = now
+    game.processing_notes = {"unlinked": result.unlinked, "duration_mins": round(duration_mins, 1), "casual": True}
+    await session.commit()
+    log.info("Recorded casual game %s: %d linked, no ratings changed", game.riot_match_id, len(result.results))
     return result
 
 

@@ -4,11 +4,15 @@ Lobby lifecycle: create -> queue -> teams (captain draft / balanced / pick order
 DB is the source of truth so the bot survives restarts mid-lobby.
 
 Modes
+  pick_order  The default, and the one that makes the ladder measure all-round skill.
+              No role queue: teams are balanced on MMR alone and each player gets a
+              champ-select pick position 1-5. Roles are claimed in champ select in pick
+              order, and the role actually played is read from Riot's match data.
+              Pick positions rotate: whoever has had late picks recently gets early ones.
+  balanced    the bot searches all 126 team splits for the smallest MMR gap and best
+              fit to stated role preferences (role queue).
   captain     two captains (highest MMR by default) snake-draft players, then roles are
               auto-suggested from preferences and captains can reassign with /inhouse role.
-  balanced    the bot searches all 126 team splits for the smallest MMR gap and best role fit.
-  pick_order  balanced teams, but roles inside each team go by queue join order
-              (first come first serve).
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ from bot.services.rating_engine import ROLES, normalize_role, ROLE_DISPLAY
 
 log = logging.getLogger("ranked-bot.lobby")
 
-MODES = ("captain", "balanced", "pick_order")
+MODES = ("pick_order", "balanced", "captain")
 ACTIVE_STATUSES = ("waiting", "drafting", "active")
 
 
@@ -41,7 +45,7 @@ class LobbyError(Exception):
 # ------------------------------------------------------------------ #
 
 async def create_lobby(session: AsyncSession, guild_id: str, channel_id: str, host_discord_id: str,
-                       mode: str = "captain", max_players: int | None = None) -> Lobby:
+                       mode: str = "pick_order", max_players: int | None = None, ranked: bool = True) -> Lobby:
     if mode not in MODES:
         raise LobbyError(f"Unknown mode '{mode}'. Choose from: {', '.join(MODES)}")
     existing = await session.scalar(select(Lobby).where(
@@ -49,7 +53,7 @@ async def create_lobby(session: AsyncSession, guild_id: str, channel_id: str, ho
     if existing:
         raise LobbyError("A lobby is already active in this channel. Cancel or finish it first.")
     lobby = Lobby(guild_id=guild_id, channel_id=channel_id, host_discord_id=host_discord_id, mode=mode,
-                  max_players=max_players or config.LOBBY_SIZE)
+                  max_players=max_players or config.LOBBY_SIZE, ranked=ranked)
     session.add(lobby)
     await session.commit()
     await session.refresh(lobby)
@@ -94,6 +98,9 @@ async def queue_player(session: AsyncSession, lobby: Lobby, discord_id: str,
         raise LobbyError("You are already in the queue.")
     if len(lobby.players) >= lobby.max_players:
         raise LobbyError("The lobby is full.")
+    if lobby.mode == "pick_order":
+        # No role queue: roles are claimed in champ select by pick position.
+        preferred_role = secondary_role = None
     pref = normalize_role(preferred_role) if preferred_role else None
     sec = normalize_role(secondary_role) if secondary_role else None
     lp = LobbyPlayer(lobby_id=lobby.id, player_id=p.id, preferred_role=pref, secondary_role=sec,
@@ -177,31 +184,86 @@ def _aware(dt: datetime | None) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def assign_roles_pick_order(team: list[LobbyPlayer]) -> None:
-    """First come first serve: earlier joiners get their preferred role."""
-    ordered = sorted(team, key=lambda x: _aware(x.joined_at))
-    free = list(ROLES)
-    later: list[LobbyPlayer] = []
-    for lp in ordered:
-        if lp.preferred_role in free:
-            lp.assigned_role = lp.preferred_role
-            free.remove(lp.preferred_role)
-        elif lp.secondary_role in free:
-            lp.assigned_role = lp.secondary_role
-            free.remove(lp.secondary_role)
-        else:
-            later.append(lp)
-    for lp in later:
-        lp.assigned_role = free.pop(0)
+PICK_PRIOR_GAMES = 2.0   # pseudo-games at the middle pick (3) so one unlucky game does not dominate
+PICK_HISTORY_LIMIT = 20  # only recent pick-order games count toward priority
 
 
-def best_balanced_split(players: list[LobbyPlayer], ratings: dict[int, dict]) -> tuple[list[LobbyPlayer], list[LobbyPlayer]]:
-    """Search all splits of 10 into 5v5; minimise MMR gap, break ties with role fit."""
+def pick_priority(player_ids: list[int], history: dict[int, list[int]], rng: random.Random | None = None) -> list[int]:
+    """
+    Order players for champ-select picks, earliest pick first.
+
+    Fairness rule: whoever has been picking LATE recently picks EARLY now. Each
+    player's average past pick position (1 = first, 5 = last) is shrunk toward the
+    middle (3) by PICK_PRIOR_GAMES, so newcomers sit in the middle and one game
+    cannot swing things. Higher average = more owed = earlier pick. Ties are
+    broken at random so identical histories do not always resolve the same way.
+    """
+    rng = rng or random.Random()
+    def owed(pid: int) -> float:
+        past = history.get(pid, [])[-PICK_HISTORY_LIMIT:]
+        return (sum(past) + PICK_PRIOR_GAMES * 3.0) / (len(past) + PICK_PRIOR_GAMES)
+    return sorted(player_ids, key=lambda pid: (-owed(pid), rng.random()))
+
+
+async def pick_history(session: AsyncSession, player_ids: list[int]) -> dict[int, list[int]]:
+    """Past pick positions from completed pick-order lobbies, oldest first."""
+    rows = (await session.execute(
+        select(LobbyPlayer.player_id, LobbyPlayer.pick_order)
+        .join(Lobby, Lobby.id == LobbyPlayer.lobby_id)
+        .where(Lobby.mode == "pick_order", Lobby.status == "completed",
+               LobbyPlayer.pick_order.is_not(None), LobbyPlayer.player_id.in_(player_ids))
+        .order_by(Lobby.id)
+    )).all()
+    out: dict[int, list[int]] = {}
+    for pid, pos in rows:
+        out.setdefault(pid, []).append(int(pos))
+    return out
+
+
+def assign_pick_positions(team: list[LobbyPlayer], history: dict[int, list[int]],
+                          rng: random.Random | None = None) -> None:
+    """Give each player on a team a pick position 1-5. Clears any assigned role."""
+    order = pick_priority([lp.player_id for lp in team], history, rng)
+    pos = {pid: i + 1 for i, pid in enumerate(order)}
+    for lp in team:
+        lp.pick_order = pos[lp.player_id]
+        lp.assigned_role = None
+
+
+PICK_ORDER_GAP_TOLERANCE = 10.0  # MMR; splits this close to the fairest are treated as equal
+
+
+def best_balanced_split(players: list[LobbyPlayer], ratings: dict[int, dict], use_roles: bool = True,
+                        rng: random.Random | None = None) -> tuple[list[LobbyPlayer], list[LobbyPlayer]]:
+    """
+    Search all splits of 10 into 5v5.
+    use_roles=True  (balanced mode): minimise MMR gap, trading it against role-preference fit.
+    use_roles=False (pick order):    MMR gap only. Picks at random among splits within
+                                     PICK_ORDER_GAP_TOLERANCE of the fairest, so the same ten
+                                     people do not get identical teams every night.
+    """
     n = len(players)
     half = n // 2
-    best_key, best = None, None
     idx = list(range(n))
     seen = set()
+    if not use_roles:
+        rng = rng or random.Random()
+        splits = []
+        for combo in itertools.combinations(idx, half):
+            comp = tuple(i for i in idx if i not in combo)
+            key = frozenset([combo, comp])
+            if key in seen:
+                continue
+            seen.add(key)
+            t1 = [players[i] for i in combo]
+            t2 = [players[i] for i in comp]
+            gap = abs(sum(ratings[p.player_id]["mmr"] for p in t1) - sum(ratings[p.player_id]["mmr"] for p in t2)) / half
+            splits.append((gap, t1, t2))
+        best_gap = min(g for g, _, _ in splits)
+        close = [(t1, t2) for g, t1, t2 in splits if g <= best_gap + PICK_ORDER_GAP_TOLERANCE]
+        t1, t2 = rng.choice(close)
+        return list(t1), list(t2)
+    best_key, best = None, None
     for combo in itertools.combinations(idx, half):
         comp = tuple(i for i in idx if i not in combo)
         key = frozenset([combo, comp])
@@ -220,20 +282,22 @@ def best_balanced_split(players: list[LobbyPlayer], ratings: dict[int, dict]) ->
 
 
 async def make_teams(session: AsyncSession, lobby: Lobby) -> tuple[list[LobbyPlayer], list[LobbyPlayer]]:
-    """balanced / pick_order modes: build teams and roles, set lobby active."""
+    """balanced / pick_order modes: build teams (and roles or pick positions), set lobby active."""
     if len(lobby.players) < lobby.max_players:
         raise LobbyError(f"Need {lobby.max_players} players, have {len(lobby.players)}.")
     ratings = await lobby_ratings(session, lobby)
-    team1, team2 = best_balanced_split(list(lobby.players), ratings)
+    pick_order = lobby.mode == "pick_order"
+    team1, team2 = best_balanced_split(list(lobby.players), ratings, use_roles=not pick_order)
     if random.random() < 0.5:   # random side
         team1, team2 = team2, team1
     for lp in team1:
         lp.team = 1
     for lp in team2:
         lp.team = 2
-    if lobby.mode == "pick_order":
-        assign_roles_pick_order(team1)
-        assign_roles_pick_order(team2)
+    if pick_order:
+        history = await pick_history(session, [lp.player_id for lp in lobby.players])
+        assign_pick_positions(team1, history)
+        assign_pick_positions(team2, history)
     else:
         assign_roles_best_fit(team1, ratings)
         assign_roles_best_fit(team2, ratings)
@@ -327,6 +391,9 @@ async def set_role(session: AsyncSession, lobby: Lobby, requester_discord_id: st
     """Captain (or host/admin) moves a teammate to a role; swaps with whoever had it."""
     if lobby.status != "active":
         raise LobbyError("Teams are not set yet.")
+    if lobby.mode == "pick_order":
+        raise LobbyError("This is a pick order lobby: there are no assigned roles. "
+                         "Players claim roles in champ select in pick order.")
     role = normalize_role(role)
     target = await session.scalar(select(Player).where(Player.discord_id == target_discord_id))
     tlp = next((lp for lp in lobby.players if target and lp.player_id == target.id), None)
@@ -364,6 +431,9 @@ async def complete_lobby(session: AsyncSession, lobby: Lobby) -> None:
     await session.commit()
 
 
-def team_lines(team: list[LobbyPlayer], names: dict[int, str]) -> list[str]:
+def team_lines(team: list[LobbyPlayer], names: dict[int, str], mode: str = "balanced") -> list[str]:
+    if mode == "pick_order":
+        ordered = sorted(team, key=lambda x: x.pick_order or 99)
+        return [f"**Pick {lp.pick_order}** {names.get(lp.player_id, '?')}" for lp in ordered]
     ordered = sorted(team, key=lambda x: ROLES.index(x.assigned_role) if x.assigned_role in ROLES else 99)
     return [f"**{ROLE_DISPLAY.get(lp.assigned_role, '?')}** {names.get(lp.player_id, '?')}" for lp in ordered]

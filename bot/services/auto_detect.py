@@ -92,7 +92,7 @@ async def poll_once(session_factory) -> list[tuple[Lobby, game_processor.Process
                     try:
                         result = await game_processor.process_match(
                             session, mid, submitted_by="auto-detect", lobby_id=lobby.id, auto_detected=True,
-                            match_data=match, timeline_data=timeline)
+                            match_data=match, timeline_data=timeline, ranked=lobby.ranked)
                     except ValueError as e:
                         log.info("skip %s: %s", mid, e)
                         continue

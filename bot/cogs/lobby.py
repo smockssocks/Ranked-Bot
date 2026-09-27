@@ -112,7 +112,11 @@ class LobbyCog(commands.Cog, name="Lobby"):
                 await inter.followup.send(str(e), ephemeral=True)
                 return
             n = len(lobby.players)
-            await inter.followup.send(f"You're in ({n}/{lobby.max_players}).", ephemeral=True)
+            note = ""
+            if lobby.mode == "pick_order" and (role or secondary):
+                note = ("\nThis is a **pick order** lobby, so there is no role queue. You'll get a pick "
+                        "position when teams are made, and roles are claimed in champ select in pick order.")
+            await inter.followup.send(f"You're in ({n}/{lobby.max_players}).{note}", ephemeral=True)
             await self.refresh_lobby_message(session, lobby)
             if n >= lobby.max_players:
                 channel = self.bot.get_channel(int(lobby.channel_id))
@@ -179,7 +183,13 @@ class LobbyCog(commands.Cog, name="Lobby"):
                 await self.create_draft(session, lobby, names)
             except drafter_api.DrafterError as e:
                 note = f"\n(drafter.lol draft could not be created: {e})"
-        await dest.send("**Teams are set!**" + note, embed=embeds.teams_embed(lobby, names, ratings))
+        header = "**Teams are set!**"
+        if lobby.mode == "pick_order":
+            header += ("\nNo role queue tonight. In champ select, **Pick 1 calls their role first**, then Pick 2, "
+                       "and so on. Line up in the custom lobby in pick order, top slot first.")
+        if not lobby.ranked:
+            header += "\n*Casual lobby: results will be posted, but no LP changes.*"
+        await dest.send(header + note, embed=embeds.teams_embed(lobby, names, ratings))
 
     async def create_draft(self, session, lobby, names):
         t1 = lobby.team1_name or "Blue"
@@ -213,20 +223,32 @@ class LobbyCog(commands.Cog, name="Lobby"):
     inhouse = app_commands.Group(name="inhouse", description="Inhouse lobby management.")
 
     @inhouse.command(name="create", description="Open a new inhouse lobby with Join/Leave buttons.")
-    @app_commands.describe(mode="How teams are made")
+    @app_commands.describe(mode="How teams are made. Leave empty for this server's default.",
+                           casual="Casual lobby: results are posted but nobody's LP changes.")
     @app_commands.choices(mode=[
-        app_commands.Choice(name="Captain draft (captains pick, then set roles)", value="captain"),
-        app_commands.Choice(name="Balanced (bot balances MMR + roles)", value="balanced"),
-        app_commands.Choice(name="Pick order (balanced teams, roles first-come-first-serve)", value="pick_order"),
+        app_commands.Choice(name="Pick order (no role queue: roles claimed in champ select)", value="pick_order"),
+        app_commands.Choice(name="Balanced (bot balances MMR and role preferences)", value="balanced"),
+        app_commands.Choice(name="Captain draft (captains pick players, then set roles)", value="captain"),
     ])
-    async def inhouse_create(self, inter: discord.Interaction, mode: app_commands.Choice[str] | None = None):
+    async def inhouse_create(self, inter: discord.Interaction, mode: app_commands.Choice[str] | None = None,
+                             casual: bool = False):
         if await self._wrong_channel(inter):
             return
         await inter.response.defer()
         async with SessionLocal() as session:
+            gid = str(inter.guild_id)
+            chosen, err = settings.resolve_mode(mode.value if mode else None,
+                                                await settings.allowed_modes(session, gid),
+                                                await settings.default_mode(session, gid))
+            if err:
+                await inter.followup.send(err)
+                return
+            if casual and not await settings.casual_allowed(session, gid):
+                await inter.followup.send("Casual lobbies are turned off on this server. Every game here is ranked.")
+                return
             try:
-                lobby = await lobby_manager.create_lobby(session, str(inter.guild_id), str(inter.channel_id),
-                                                         str(inter.user.id), mode.value if mode else "captain")
+                lobby = await lobby_manager.create_lobby(session, gid, str(inter.channel_id),
+                                                         str(inter.user.id), chosen, ranked=not casual)
             except LobbyError as e:
                 await inter.followup.send(str(e))
                 return
@@ -368,8 +390,10 @@ class LobbyCog(commands.Cog, name="Lobby"):
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
             try:
+                in_lobby = lobby is not None and lobby.status == "active"
                 result = await process_match(session, match_id.strip(), submitted_by=inter.user.name,
-                                             lobby_id=lobby.id if lobby and lobby.status == "active" else None)
+                                             lobby_id=lobby.id if in_lobby else None,
+                                             ranked=lobby.ranked if in_lobby else True)
             except ValueError as e:
                 await inter.followup.send(str(e))
                 return

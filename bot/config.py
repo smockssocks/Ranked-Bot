@@ -89,6 +89,11 @@ CHAT_PERSONA = os.getenv(
 
 # --- Lobby -----------------------------------------------------------------
 LOBBY_SIZE = _int("LOBBY_SIZE", 10)
+# Which team-making modes hosts may open, and the one used when they do not pick.
+# Changeable in Discord with /admin modes; these are only the starting values.
+ALLOWED_MODES = [m.strip() for m in os.getenv("ALLOWED_MODES", "pick_order,balanced,captain").split(",") if m.strip()]
+DEFAULT_MODE = os.getenv("DEFAULT_MODE", "pick_order")
+CASUAL_ALLOWED = _bool("CASUAL_ALLOWED", True)
 LOBBY_TIMEOUT_SECS = _int("LOBBY_TIMEOUT_SECS", 3600)
 AUTO_DETECT_ENABLED = _bool("AUTO_DETECT_ENABLED", True)
 AUTO_DETECT_POLL_SECS = _int("AUTO_DETECT_POLL_SECS", 120)

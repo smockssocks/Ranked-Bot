@@ -9,6 +9,12 @@ from bot.models.settings import GuildSetting
 
 KEY_MOD_CHANNEL = "mod_channel_id"
 KEY_QUEUE_CHANNEL = "queue_channel_id"
+KEY_ALLOWED_MODES = "allowed_modes"
+KEY_DEFAULT_MODE = "default_mode"
+KEY_CASUAL_ALLOWED = "casual_allowed"
+
+ALL_MODES = ("pick_order", "balanced", "captain")
+MODE_NAMES = {"pick_order": "Pick order", "balanced": "Balanced", "captain": "Captain draft"}
 KEY_RESULTS_CHANNEL = "results_channel_id"
 KEY_SEASON = "season"
 
@@ -60,3 +66,37 @@ async def results_channel_id(session: AsyncSession, guild_id: str) -> int:
 async def current_season(session: AsyncSession, guild_id: str) -> int:
     v = await get_setting(session, guild_id, KEY_SEASON)
     return int(v) if v else config.CURRENT_SEASON
+
+
+# --------------------------------------------------------------------------- #
+# Lobby modes                                                                 #
+# --------------------------------------------------------------------------- #
+
+async def allowed_modes(session: AsyncSession, guild_id: str) -> list[str]:
+    v = await get_setting(session, guild_id, KEY_ALLOWED_MODES)
+    raw = v.split(",") if v is not None else config.ALLOWED_MODES
+    modes = [m for m in ALL_MODES if m in {x.strip() for x in raw}]
+    return modes or ["pick_order"]
+
+
+async def default_mode(session: AsyncSession, guild_id: str) -> str:
+    v = await get_setting(session, guild_id, KEY_DEFAULT_MODE)
+    return v if v in ALL_MODES else (config.DEFAULT_MODE if config.DEFAULT_MODE in ALL_MODES else "pick_order")
+
+
+async def casual_allowed(session: AsyncSession, guild_id: str) -> bool:
+    v = await get_setting(session, guild_id, KEY_CASUAL_ALLOWED)
+    return (v == "1") if v is not None else config.CASUAL_ALLOWED
+
+
+def resolve_mode(requested: str | None, allowed: list[str], default: str) -> tuple[str | None, str | None]:
+    """
+    Pure decision for /inhouse create. Returns (mode, None) or (None, error message).
+    With no request, use the default if it is allowed, otherwise the first allowed mode.
+    """
+    if requested is None:
+        return (default if default in allowed else allowed[0]), None
+    if requested in allowed:
+        return requested, None
+    names = ", ".join(MODE_NAMES[m] for m in allowed)
+    return None, f"{MODE_NAMES.get(requested, requested)} lobbies are turned off on this server. Allowed: {names}."

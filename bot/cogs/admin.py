@@ -153,6 +153,62 @@ class AdminCog(commands.Cog, name="Admin"):
             await settings.set_setting(session, str(inter.guild_id), settings.KEY_MOD_CHANNEL, str(channel.id))
         await inter.response.send_message(f"Mod alerts will go to {channel.mention}.", ephemeral=True)
 
+    @admin.command(name="modes", description="Choose which lobby modes hosts can open, the default, and casual lobbies.")
+    @app_commands.describe(
+        pick_order="Allow pick order lobbies (no role queue).",
+        balanced="Allow balanced lobbies (role queue).",
+        captain="Allow captain draft lobbies.",
+        default="Mode used when a host does not choose one.",
+        casual="Allow hosts to open casual lobbies that do not change LP.",
+    )
+    @app_commands.choices(default=[
+        app_commands.Choice(name="Pick order", value="pick_order"),
+        app_commands.Choice(name="Balanced", value="balanced"),
+        app_commands.Choice(name="Captain draft", value="captain"),
+    ])
+    async def admin_modes(self, inter: discord.Interaction, pick_order: bool | None = None,
+                          balanced: bool | None = None, captain: bool | None = None,
+                          default: app_commands.Choice[str] | None = None, casual: bool | None = None):
+        gid = str(inter.guild_id)
+        async with SessionLocal() as session:
+            allowed = await settings.allowed_modes(session, gid)
+            dflt = await settings.default_mode(session, gid)
+            cas = await settings.casual_allowed(session, gid)
+            changed = any(v is not None for v in (pick_order, balanced, captain, default, casual))
+            notes: list[str] = []
+            if changed:
+                want = {"pick_order": pick_order, "balanced": balanced, "captain": captain}
+                new_allowed = [m for m in settings.ALL_MODES
+                               if (want[m] if want[m] is not None else m in allowed)]
+                if not new_allowed:
+                    await inter.response.send_message("At least one mode has to stay on.", ephemeral=True)
+                    return
+                new_default = default.value if default else dflt
+                if new_default not in new_allowed:
+                    if default:
+                        await inter.response.send_message(
+                            f"{settings.MODE_NAMES[new_default]} can't be the default while it's turned off.",
+                            ephemeral=True)
+                        return
+                    new_default = new_allowed[0]
+                    notes.append(f"The default was turned off, so it is now {settings.MODE_NAMES[new_default]}.")
+                new_cas = casual if casual is not None else cas
+                await settings.set_setting(session, gid, settings.KEY_ALLOWED_MODES, ",".join(new_allowed))
+                await settings.set_setting(session, gid, settings.KEY_DEFAULT_MODE, new_default)
+                await settings.set_setting(session, gid, settings.KEY_CASUAL_ALLOWED, "1" if new_cas else "0")
+                allowed, dflt, cas = new_allowed, new_default, new_cas
+        lines = ["**Lobby modes**" + (" updated." if changed else "")]
+        for m in settings.ALL_MODES:
+            on = m in allowed
+            star = "  ← default" if m == dflt else ""
+            lines.append(f"{'✅' if on else '⛔'} {settings.MODE_NAMES[m]}{star}")
+        lines.append(f"{'✅' if cas else '⛔'} Casual lobbies (no LP)")
+        lines += notes
+        if not changed:
+            lines.append("\nChange with options, e.g. `/admin modes balanced:False captain:False` "
+                         "to make pick order the only way to play.")
+        await inter.response.send_message("\n".join(lines), ephemeral=True)
+
     @admin.command(name="queuechannel", description="Lock inhouse queues to ONE channel (recommended).")
     @app_commands.describe(channel="The channel queues live in. Leave empty to see the current setting.",
                            clear="Set to True to allow queues in any channel again.")

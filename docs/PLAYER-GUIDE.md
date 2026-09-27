@@ -21,22 +21,26 @@ That is the name and tag exactly as they appear in the League client. You cannot
 **2. Join the queue**
 All queues happen in #inhouse-queue.
 When a lobby is open, press the green **Join** button.
-Want a specific role? Use `/queue role:Mid secondary:Top` instead.
 Changed your mind? Press **Leave** or run `/dequeue`.
 
-**3. Play**
-At 10 players the host starts it. The bot posts the two teams and your role.
+**3. Get your pick**
+At 10 players the host starts it. The bot makes fair teams and gives you a **pick position, 1 to 5**.
+**There is no role queue.** In champ select, Pick 1 calls their role first, then Pick 2, and so on. Line up in the custom lobby in pick order.
+Picks rotate: a late pick now means an early pick soon.
+
+**4. Play**
 Join the custom game and play. **You do not report anything.** The bot finds the game and posts everyone's LP within a couple of minutes.
 
-**Check your rank**
-`/rank` your tier, LP, record and per-role stats
-`/history` your recent games
-`/explain` exactly why your last game gained or lost LP
-`/leaderboard` the ladder
-`/howranked` how the ranking actually works
+**Why no role queue?**
+This server ranks all-round skill. You're always judged against the average for the role you actually played, so a great support game counts as much as a great mid game. Players who are good at every role climb highest.
 
-**How LP works, briefly**
-Winning matters most, but how you played counts too. You are compared to your lane opponent and to the average for your role on this server, never to your champion. Play great in a loss and you barely drop. Get carried in a win and you gain less. Your first 5 games are placements and move faster.
+**Check your rank**
+`/rank` tier, LP, and how you do in each role
+`/explain` exactly why your last game gained or lost LP
+`/leaderboard` the ladder, or `sort:Versatility` for all-round skill
+`/howranked` how it all works
+
+Winning matters most, but how you played counts too. Your first 5 games are placements and move faster.
 
 Stuck? Run `/help` any time.
 ```
@@ -50,7 +54,7 @@ Stuck? Run `/help` any time.
 | Step | Command | Notes |
 | --- | --- | --- |
 | Link | `/link Danman#NA1` | Once, ever. Blocks queueing until done. |
-| Join | **Join** button, or `/queue` | `role` and `secondary` are optional preferences. |
+| Join | **Join** button, or `/queue` | Role preferences only apply in balanced and captain lobbies. |
 | Leave | **Leave** button, or `/dequeue` | Only while the lobby is still filling. |
 | Play | nothing | Results are detected automatically. |
 | Check | `/rank`, `/history`, `/explain` | `/explain` is the one that stops arguments. |
@@ -88,16 +92,39 @@ To go back to allowing any channel, run `/admin queuechannel clear:True`.
 Results are always posted in the queue channel. A results channel just adds a second copy,
 which is useful if your queue channel gets chatty.
 
+### Choosing which modes exist
+
+Pick order is the default. It is the mode that makes your ladder measure all-round skill,
+because players regularly end up off their main role and are scored against the average for
+whatever role they actually played. In testing with the real rating engine, a one-trick
+ranks far above an all-rounder under role queue, and far below them under pick order.
+
+See or change what hosts are allowed to open:
+
+```
+/admin modes
+/admin modes balanced:False captain:False     <- pick order only
+/admin modes casual:False                     <- every game is ranked
+```
+
+| Mode | How teams are made | Roles |
+| --- | --- | --- |
+| **Pick order** (default) | Fairest split by rating | Claimed in champ select by pick position. Positions rotate fairly. |
+| Balanced | Fairest split by rating and role preference | Assigned from preferences (role queue) |
+| Captain draft | Two captains pick players | Captains set them |
+
+**Casual lobbies** post results and stats but change nobody's LP. Use them for joke games,
+practice, or teaching a newcomer. Hosts open one with `/inhouse create casual:True`.
+
 ### Running a game night as host
 
-1. In the queue channel, `/inhouse create` and pick a mode:
-   - **Balanced** is the easy default. The bot makes the fairest teams it can.
-   - **Captain draft** for a more social night. Two captains pick.
-   - **Pick order** gives roles to whoever queued first.
+1. In the queue channel, run `/inhouse create`. It uses your default mode.
+   Add `casual:True` if tonight shouldn't count.
 2. Wait for 10. The bot pings you when the lobby fills.
-3. Press **Start**.
-4. Create the custom lobby in the League client and play.
-5. Do nothing else. The bot posts results and closes the lobby.
+3. Press **Start**. The bot posts teams and each player's pick position.
+4. Create the custom lobby in the League client, **Tournament Draft**, and have players
+   take their slots in pick order, top slot first.
+5. Play. The bot posts results and closes the lobby by itself.
 
 If the bot somehow misses a game, run `/inhouse submit MATCH_ID` in the queue channel.
 
@@ -106,6 +133,15 @@ If the bot somehow misses a game, run `/inhouse submit MATCH_ID` in the queue ch
 **"Why did I lose LP when I played well?"**
 Tell them to run `/explain`. It shows the exact stats that helped and hurt, and the numbers
 behind their LP change.
+
+**"Why did I get last pick again?"**
+Picks rotate based on the last 20 pick order games. If they had late picks recently, they're
+first in line for early ones. Over a few nights it evens out for everyone.
+
+**"I got stuck on a role I don't play."**
+That's the point of pick order. They're judged against the average for that role, not against
+their main, so a decent off-role game is not punished. Their `/rank` shows how they do in
+each role, and getting better at their weak ones is how they climb.
 
 **"Why am I not gaining much for winning?"**
 They were favoured, or they were carried. Both reduce the gain.

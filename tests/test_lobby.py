@@ -46,20 +46,70 @@ async def test_queue_and_balanced_teams(db):
             assert all(x.assigned_role == x.preferred_role for x in team)   # every preference honoured
 
 
-async def test_pick_order_roles_first_come_first_serve(db):
+async def test_pick_order_is_not_role_queue(db):
+    """Pick order ignores role preferences entirely and hands out pick positions 1-5."""
     async with db() as session:
         players = await _players(session)
-        lobby = await lm.create_lobby(session, "g", "c", "host-999", mode="pick_order")
-        base = datetime.now(timezone.utc)
         for i, p in enumerate(players):
-            lp = await lm.queue_player(session, lobby, p.discord_id, "MIDDLE")   # everyone wants mid
-            lp.joined_at = base + timedelta(seconds=i)
+            r = await game_processor.get_or_create_rating(session, p.id, "OVERALL", 1)
+            r.mmr = 1300 + i * 60
         await session.commit()
+        lobby = await lm.create_lobby(session, "g", "c", "host-999")          # default mode
+        assert lobby.mode == "pick_order" and lobby.ranked is True
+        for p in players:
+            lp = await lm.queue_player(session, lobby, p.discord_id, "MIDDLE", "TOP")
+            assert lp.preferred_role is None and lp.secondary_role is None    # no role queue
         t1, t2 = await lm.make_teams(session, lobby)
         for team in (t1, t2):
-            first = min(team, key=lambda x: lm._aware(x.joined_at))
-            assert first.assigned_role == "MIDDLE"
-            assert sorted(x.assigned_role for x in team) == sorted(lm.ROLES)
+            assert sorted(x.pick_order for x in team) == [1, 2, 3, 4, 5]
+            assert all(x.assigned_role is None for x in team)
+        ratings = await lm.lobby_ratings(session, lobby)
+        gap = abs(sum(ratings[x.player_id]["mmr"] for x in t1) - sum(ratings[x.player_id]["mmr"] for x in t2)) / 5
+        assert gap <= 10 + lm.PICK_ORDER_GAP_TOLERANCE
+        lines = lm.team_lines(t1, {x.player_id: "n" for x in t1}, "pick_order")
+        assert lines[0].startswith("**Pick 1**")
+        someone = await session.get(Player, t1[0].player_id)
+        with pytest.raises(LobbyError):
+            await lm.set_role(session, lobby, "host-999", someone.discord_id, "TOP", is_admin=True)
+
+
+def test_pick_priority_rotation():
+    import random
+    rng = random.Random(0)
+    history = {1: [5, 5, 4], 2: [1, 1, 2], 3: [], 4: [3, 3], 5: [4, 5]}
+    order = lm.pick_priority([1, 2, 3, 4, 5], history, rng)
+    assert order[0] == 1          # most late picks recently -> picks first now
+    assert order[-1] == 2         # most early picks recently -> picks last now
+    assert order.index(3) in (1, 2, 3)   # newcomer sits in the middle
+    # only the most recent PICK_HISTORY_LIMIT games count
+    old_luck = {7: [5] * 50 + [1] * lm.PICK_HISTORY_LIMIT, 8: []}
+    assert lm.pick_priority([7, 8], old_luck, rng)[0] == 8
+
+
+async def test_pick_history_feeds_next_lobby(db):
+    """Late picks in a completed pick-order lobby earn early picks next time; captain picks are ignored."""
+    async with db() as session:
+        players = await _players(session)
+        done = await lm.create_lobby(session, "g", "c1", "h", mode="pick_order")
+        for p in players:
+            await lm.queue_player(session, done, p.discord_id)
+        await lm.make_teams(session, done)
+        unlucky = {lp.player_id for lp in done.players if lp.pick_order == 5}
+        done.status = "completed"
+        cap = await lm.create_lobby(session, "g", "c2", "h", mode="captain")   # captain pick indexes must not count
+        for p in players[:2]:
+            session.add(LobbyPlayer(lobby_id=cap.id, player_id=p.id, pick_order=-1))
+        cap.status = "completed"
+        await session.commit()
+        hist = await lm.pick_history(session, [p.id for p in players])
+        assert all(-1 not in v for v in hist.values())
+        nxt = await lm.create_lobby(session, "g", "c3", "h")
+        for p in players:
+            await lm.queue_player(session, nxt, p.discord_id)
+        await lm.make_teams(session, nxt)
+        for lp in nxt.players:
+            if lp.player_id in unlucky:
+                assert lp.pick_order <= 2, "last pick last time should mean an early pick now"
 
 
 async def test_captain_draft_flow_and_role_swap(db):

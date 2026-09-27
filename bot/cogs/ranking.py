@@ -43,11 +43,18 @@ class RankingCog(commands.Cog, name="Ranking"):
                 .order_by(desc(Game.played_at)).limit(10))).scalars().all()
         await inter.followup.send(embed=embeds.rank_embed(p.discord_username, overall, roles, p.summoner_name, recent))
 
-    @app_commands.command(name="leaderboard", description="Top players this season.")
-    @app_commands.describe(role="Show the ladder for one role")
-    @app_commands.choices(role=[app_commands.Choice(name=v, value=k) for k, v in ROLE_DISPLAY.items()])
-    async def leaderboard(self, inter: discord.Interaction, role: app_commands.Choice[str] | None = None):
+    @app_commands.command(name="leaderboard", description="Top players this season, by LP or by versatility.")
+    @app_commands.describe(role="Show the ladder for one role",
+                           sort="Rank by LP (default) or by how good players are across every role")
+    @app_commands.choices(role=[app_commands.Choice(name=v, value=k) for k, v in ROLE_DISPLAY.items()],
+                          sort=[app_commands.Choice(name="LP", value="lp"),
+                                app_commands.Choice(name="Versatility (all-round skill)", value="versatility")])
+    async def leaderboard(self, inter: discord.Interaction, role: app_commands.Choice[str] | None = None,
+                          sort: app_commands.Choice[str] | None = None):
         await inter.response.defer()
+        if sort and sort.value == "versatility":
+            await self._versatility_board(inter)
+            return
         key = role.value if role else "OVERALL"
         async with SessionLocal() as session:
             rows = (await session.execute(
@@ -66,7 +73,32 @@ class RankingCog(commands.Cog, name="Ranking"):
             plc = " ⏳" if r.games_played < config.PLACEMENT_GAMES else ""
             lines.append(f"`{i:>2}.` {emoji} **{p.discord_username}** — {r.lp} LP ({division_for_lp(r.lp)}) • {r.games_played}G {wr:.0f}% • PS {r.perf_mean:+.2f}{plc}")
         e.description = "\n".join(lines)
-        e.set_footer(text="⏳ = still in placements")
+        e.set_footer(text="⏳ = still in placements • /leaderboard sort:Versatility for all-round skill")
+        await inter.followup.send(embed=e)
+
+    async def _versatility_board(self, inter: discord.Interaction):
+        async with SessionLocal() as session:
+            rows = (await session.execute(
+                select(PlayerRating, Player).join(Player, Player.id == PlayerRating.player_id)
+                .where(PlayerRating.season == config.CURRENT_SEASON))).all()
+        by_player: dict[int, tuple[Player, list]] = {}
+        for r, p in rows:
+            by_player.setdefault(p.id, (p, []))[1].append(r)
+        scored = []
+        for p, rrows in by_player.values():
+            overall = next((r for r in rrows if r.role == "OVERALL"), None)
+            if not overall or overall.games_played == 0:
+                continue
+            scored.append((embeds.versatility_of(rrows), p, overall))
+        if not scored:
+            await inter.followup.send("No ranked games yet this season.")
+            return
+        scored.sort(key=lambda t: t[0].score, reverse=True)
+        e = discord.Embed(title=f"Versatility (Season {config.CURRENT_SEASON})", color=discord.Color.purple())
+        lines = [f"`{i:>2}.` **{p.discord_username}** — **{v.score:+.2f}** • {v.proven}/5 roles proven • {o.lp} LP"
+                 for i, (v, p, o) in enumerate(scored[:15], 1)]
+        e.description = "\n".join(lines)
+        e.set_footer(text="How good you are across every role. Weak or untested roles pull the score down.")
         await inter.followup.send(embed=e)
 
     @app_commands.command(name="history", description="Recent games with LP changes.")
@@ -161,15 +193,19 @@ class RankingCog(commands.Cog, name="Ranking"):
         e.add_field(
             name="2. Join the queue",
             value=(f"When someone opens a lobby in {where}, press the green **Join** button.\n"
-                   "Prefer a role? Use `/queue role:Mid secondary:Top` instead. The bot tries hard "
-                   "to give everyone their role.\n"
                    "Changed your mind? Press **Leave** or run `/dequeue`."),
             inline=False)
         e.add_field(
-            name="3. Play",
-            value=("At 10 players the host starts it and the bot posts the teams and your roles.\n"
-                   "Join the custom game, play it out. You do not need to report anything: the bot "
-                   "finds the game and posts everyone's LP changes within a couple of minutes."),
+            name="3. Get your pick",
+            value=("At 10 players the host starts it. The bot makes fair teams and gives you a "
+                   "**pick position, 1 to 5**. There is no role queue: in champ select, Pick 1 calls "
+                   "their role first, then Pick 2, and so on. Line up in the custom lobby in pick order.\n"
+                   "Picks rotate. If you had a late pick last time, you'll get an early one soon."),
+            inline=False)
+        e.add_field(
+            name="4. Play",
+            value=("Join the custom game and play it out. You do not report anything: the bot finds "
+                   "the game and posts everyone's LP within a couple of minutes."),
             inline=False)
         e.add_field(
             name="Your rank",
@@ -178,6 +214,13 @@ class RankingCog(commands.Cog, name="Ranking"):
                    "`/explain` exactly why your last game gained or lost LP\n"
                    "`/leaderboard` the ladder, or `/leaderboard role:Jungle`\n"
                    "`/howranked` how the whole system works"),
+            inline=False)
+        e.add_field(
+            name="Why no role queue?",
+            value=("This server ranks all-round skill. You'll sometimes play off-role, and you're always "
+                   "judged against the average for the role you actually played, so a good support game "
+                   "counts just as much as a good mid game. `/rank` shows your **versatility**: how good "
+                   "you are across every role."),
             inline=False)
         e.set_footer(text="Win or lose matters most, but playing well still counts. Carry a loss and you barely drop.")
         await inter.followup.send(embed=e, ephemeral=True)
@@ -193,6 +236,10 @@ class RankingCog(commands.Cog, name="Ranking"):
             "Champion choice is ignored; only what you did with it counts.\n"
             "• Short games weigh laning more; long games weigh teamfights and objectives more.\n"
             "• Carry a loss (PS around +2) and you lose nothing or gain a little. Get carried in a win and you still gain, just less.\n"
+            "• **No role queue.** Lobbies use pick order: you get a pick position and roles are claimed in champ "
+            "select. You're always scored against the role you actually played, so a player who is good at every "
+            "role climbs higher than one who is only good at one. `/leaderboard sort:Versatility` ranks exactly that.\n"
+            "• Pick positions rotate, so nobody is stuck on last pick.\n"
             "• Consistency and games in a role feed a per-role rating (`/leaderboard role`).\n"
             "• Teams are balanced on a hidden MMR that also learns from performance, so smurfs get placed fast.\n"
             "Use `/explain` after any game to see exactly what moved your LP."

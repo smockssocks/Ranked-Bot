@@ -3,8 +3,8 @@
 A Discord bot that runs League of Legends inhouse (custom) games from queue to results, and
 ranks players with a system built for a small community rather than Riot's ladder.
 
-**In one paragraph:** a host opens a lobby, ten people press Join, the bot makes teams
-(captain draft, MMR-balanced, or first-come-first-serve roles), posts drafter.lol draft links,
+**In one paragraph:** a host opens a lobby, ten people press Join, the bot makes fair teams
+and hands out pick positions (no role queue by default), posts drafter.lol draft links,
 and then watches the Riot API for the custom game. When the game ends it pulls the match and
 its minute-by-minute timeline, gives everyone a performance score, moves LP, posts the results,
 and flags suspected smurfs to your mods. Nobody has to type a match ID. It also talks back if
@@ -108,13 +108,17 @@ Run the test suite any time with `pytest`. It needs no network, Discord or keys.
 2. **Players:** press **Join**, or `/queue role:Mid secondary:Top` to state role preferences.
    The embed updates live and pings the host when it hits 10.
 3. **Host:** press **Start** (or `/inhouse start`).
-   - **Balanced:** the bot tries all 126 possible 5v5 splits, picks the one with the smallest
-     MMR gap that also honours role preferences, and posts the teams with a win prediction.
-   - **Pick order:** same balancing, but roles inside each team go by who queued first.
+   - **Pick order** (the default): the bot makes the fairest split by rating and gives each
+     player a pick position 1 to 5. There is no role queue. Pick 1 claims their role first in
+     champ select. Positions rotate, so players who had late picks recently get early ones.
+   - **Balanced:** the bot tries all 126 possible 5v5 splits and picks the one with the
+     smallest MMR gap that also honours stated role preferences (role queue).
    - **Captain:** the two highest-rated players (or random with `random_captains:true`) become
-     captains and snake-draft with `/inhouse pick @player`. Roles are auto-suggested from
-     preferences; captains can move people with `/inhouse role @player Jungle` (swaps with
-     whoever had it).
+     captains and snake-draft with `/inhouse pick @player`. Captains can move people with
+     `/inhouse role @player Jungle`.
+
+   Admins choose which of these hosts may open with `/admin modes`. Hosts can add
+   `casual:True` to `/inhouse create` for a game that posts stats but changes nobody's LP.
 4. If `DRAFTER_API_KEY` is set, the teams embed includes **blue / red / spectator** draft links.
    Captains draft on drafter.lol; the bot posts picks and bans when the draft completes. Create
    the custom lobby in the client as **Tournament Draft** and lock in the same champions.
@@ -135,8 +139,11 @@ test custom will not show up, so test the pipeline with `/admin submit` on a pas
 ### Lobbies
 - One lobby per channel, persistent buttons, state stored in the database so a restart mid-lobby
   loses nothing.
-- Three team modes (balanced / pick order / captain draft), primary and secondary role
-  preferences, captain role reassignment, `/inhouse teams`, `/inhouse status`, `/inhouse cancel`.
+- Three team modes. **Pick order** is the default and has no role queue; balanced and captain
+  draft use role preferences. Admins switch modes on and off with `/admin modes`.
+- **Casual lobbies** (`/inhouse create casual:True`) post results but never touch LP, the
+  community role averages, or the anti-smurf checks.
+- `/inhouse teams`, `/inhouse status`, `/inhouse cancel`.
 - Lobbies that never produce a game are auto-cancelled after `AUTO_DETECT_MAX_AGE_HOURS`.
 
 ### Automatic results
@@ -154,8 +161,8 @@ judged against your lane opponent and your role, never your champion.
 | Command | What |
 | --- | --- |
 | `/help` | Everything a player needs: whether they have linked, which channel to queue in, and the commands. |
-| `/rank [@player]` | Tier, LP, record, streak, peak, average performance, consistency, confidence, per-role LP, last 10 results. |
-| `/leaderboard [role]` | Top 15 overall or for one role. Placements marked. |
+| `/rank [@player]` | Tier, LP, record, streak, peak, consistency, **versatility**, a per-role performance grid, last 10 results. |
+| `/leaderboard [role] [sort]` | Top 15 by LP overall or for one role, or `sort:Versatility` for all-round skill. |
 | `/history [@player]` | Last 8 games with LP before/after. |
 | `/explain [games_ago]` | Full breakdown of one game: which stats helped, which hurt, lane numbers, the LP formula terms. |
 | `/howranked` | Plain-language explanation of the system. |
@@ -209,6 +216,7 @@ knows about you. `CHAT_PERSONA` in `.env` changes its personality.
 | `/admin rollback MATCH_ID` | Undo a game exactly (restores every rating and the learned baselines). |
 | `/admin reprocess MATCH_ID` | Rollback + process again (after tuning the model). Most recent games only. |
 | `/admin reset @player` | Back to 1000 LP and placements. |
+| `/admin modes` | Choose which lobby modes hosts can open, the default mode, and whether casual lobbies are allowed. No options shows the current setup. |
 | `/admin queuechannel` | Lock every queue command and lobby button to one channel. Run it with no options to see the current setting, or `clear:True` to allow any channel. |
 | `/admin modchannel`, `/admin resultschannel` | Channels. |
 | `/admin baselines` | What the server currently considers average per role. |
@@ -286,6 +294,33 @@ outplayed the lobby while the team collapsed. Beating a stronger team pays more,
 weaker one less, and losing as the favourite costs more. Hidden MMR moves mostly on outcome
 with a smaller performance term, so a smurf is matched against stronger teams within a few
 games.
+
+### All-round skill: pick order and versatility
+
+This server is built to rank players who are good at every role above players who are only
+good at one. That comes from two things working together.
+
+**Pick order makes LP measure it.** Because every performance is scored against the average
+for the role actually played, a player who is forced off-role and does fine loses nothing,
+and a one-trick forced off-role loses LP. Under role queue that pressure never happens. The
+test suite checks this with the real engine over simulated seasons:
+
+| Mode | One-trick | All-rounder |
+| --- | --- | --- |
+| Role queue | ranks higher | ranks lower |
+| Pick order | ranks lower | ranks higher |
+
+That is why pick order is the default, and why there is no separate "versatility bonus" in the
+LP formula: it would count the same thing twice and could be farmed.
+
+**Versatility makes it visible.** `/rank` shows a score built from each role's average
+performance, where roles with little evidence are pulled toward a slightly-below-average
+starting point, and the two weakest roles count extra. One game per role cannot fake it, and a
+role you never touch holds you down. `/leaderboard sort:Versatility` ranks everyone by it.
+
+**Pick positions rotate.** Each player's recent pick positions are averaged, and whoever has
+been picking late picks early next time. Compared with random assignment over 60 simulated
+nights, this cut the spread between the luckiest and unluckiest players by about five times.
 
 ### What the API cannot see
 
