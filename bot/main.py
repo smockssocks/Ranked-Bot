@@ -44,7 +44,7 @@ class RankedBot(commands.Bot):
         if drafter_api.is_configured():
             self.draft_poll_loop.change_interval(seconds=config.DRAFTER_POLL_SECS)
             self.draft_poll_loop.start()
-        if config.GAME_CHANNELS_ENABLED and config.GAME_CHANNEL_CLEANUP_MINUTES > 0:
+        if (config.GAME_CHANNELS_ENABLED or config.TEAM_VOICE_ENABLED) and config.GAME_CHANNEL_CLEANUP_MINUTES > 0:
             self.game_channel_cleanup.start()
 
     async def _on_app_command_error(self, interaction: discord.Interaction,
@@ -161,7 +161,7 @@ class RankedBot(commands.Bot):
             log.exception("draft poll failed")
 
     # ------------------------------------------------------------------ #
-    # background: delete private game channels once the game is over      #
+    # background: close game threads and remove team voice after the game #
     # ------------------------------------------------------------------ #
     @tasks.loop(minutes=1)
     async def game_channel_cleanup(self):
@@ -169,19 +169,12 @@ class RankedBot(commands.Bot):
         try:
             async with SessionLocal() as session:
                 for lobby in await game_channel.due_for_cleanup(session):
-                    ch = self.get_channel(int(lobby.game_channel_id))
-                    if ch is not None:
-                        try:
-                            await ch.delete(reason=f"Lobby #{lobby.id} is over")
-                        except discord.NotFound:
-                            pass
-                        except discord.HTTPException as e:
-                            log.warning("could not delete game channel %s: %s", lobby.game_channel_id, e)
-                            continue
-                    lobby.game_channel_id = None
-                await session.commit()
+                    guild = self.get_guild(int(lobby.guild_id))
+                    if guild is None:
+                        continue            # not in that server right now; try again later
+                    await game_channel.clean_up(guild, session, lobby)
         except Exception:
-            log.exception("game channel cleanup failed")
+            log.exception("game cleanup failed")
 
     @game_channel_cleanup.before_loop
     async def _before_cleanup(self):
@@ -203,6 +196,16 @@ def _validate() -> None:
         log.info("OPENROUTER_API_KEY not set: chat layer disabled.")
     if not config.DRAFTER_API_KEY:
         log.info("DRAFTER_API_KEY not set: drafter.lol drafts disabled.")
+    if config.tournament_api_key():
+        from bot.services.game_channel import callback_problem
+        problem = callback_problem(config.RIOT_TOURNAMENT_CALLBACK_URL)
+        if problem:
+            log.warning("Tournament codes are on, but %s Games will use lobby passwords until it's fixed.", problem)
+        else:
+            log.info("Tournament codes on. If Riot hasn't given this key Tournament API access, games fall "
+                     "back to lobby passwords. Test it with CHECK-RIOT-KEY.bat.")
+    else:
+        log.info("Tournament codes off: games use a lobby name and password. See TOURNAMENT-CODES.md.")
 
 
 def _friendly(title: str, lines: list[str]) -> None:

@@ -61,6 +61,17 @@ RIOT_REGION = os.getenv("RIOT_REGION", "na1")
 RIOT_PLATFORM = os.getenv("RIOT_PLATFORM", "americas")
 RIOT_TOURNAMENT_API_KEY = os.getenv("RIOT_TOURNAMENT_API_KEY", "")
 RIOT_TOURNAMENT_CALLBACK_URL = os.getenv("RIOT_TOURNAMENT_CALLBACK_URL", "https://example.com/riot-callback")
+# Real tournament codes need a Production key that Riot has given Tournament API access
+# (see TOURNAMENT-CODES.md). Turn this on when your main RIOT_API_KEY has it, or put a
+# separate tournament key in RIOT_TOURNAMENT_API_KEY, which turns it on by itself.
+TOURNAMENT_CODES = _bool("TOURNAMENT_CODES", False)
+
+
+def tournament_api_key() -> str:
+    """The key to make tournament codes with, or "" when tournament codes are off."""
+    if RIOT_TOURNAMENT_API_KEY:
+        return RIOT_TOURNAMENT_API_KEY
+    return RIOT_API_KEY if TOURNAMENT_CODES else ""
 
 # --- Database --------------------------------------------------------------
 def anchor_sqlite_url(url: str, root: Path = ROOT) -> str:
@@ -115,9 +126,13 @@ LOBBY_SIZE = _int("LOBBY_SIZE", 10)
 ALLOWED_MODES = [m.strip() for m in os.getenv("ALLOWED_MODES", "pick_order,balanced,captain").split(",") if m.strip()]
 DEFAULT_MODE = os.getenv("DEFAULT_MODE", "pick_order")
 CASUAL_ALLOWED = _bool("CASUAL_ALLOWED", True)
-# A private #game-N channel for each started inhouse, for its players and staff.
+# A private thread under the queue channel for each started inhouse, for its players and staff.
 GAME_CHANNELS_ENABLED = _bool("GAME_CHANNELS_ENABLED", True)
-GAME_CHANNEL_CLEANUP_MINUTES = _int("GAME_CHANNEL_CLEANUP_MINUTES", 15)   # 0 = keep them
+# Minutes after a game ends before its thread is closed and team voice removed. 0 = never.
+GAME_CHANNEL_CLEANUP_MINUTES = _int("GAME_CHANNEL_CLEANUP_MINUTES", 15)
+# Temporary Blue and Red voice channels per game, and moving players who are in voice into them.
+TEAM_VOICE_ENABLED = _bool("TEAM_VOICE_ENABLED", True)
+TEAM_VOICE_AUTO_MOVE = _bool("TEAM_VOICE_AUTO_MOVE", True)
 LOBBY_TIMEOUT_SECS = _int("LOBBY_TIMEOUT_SECS", 3600)
 AUTO_DETECT_ENABLED = _bool("AUTO_DETECT_ENABLED", True)
 AUTO_DETECT_POLL_SECS = _int("AUTO_DETECT_POLL_SECS", 120)

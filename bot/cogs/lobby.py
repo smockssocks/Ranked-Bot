@@ -31,7 +31,8 @@ async def _names(session, lobby) -> dict[int, str]:
 
 def cleanup_note() -> str:
     m = config.GAME_CHANNEL_CLEANUP_MINUTES
-    return f"This channel will be deleted in about {m} minutes." if m > 0 else ""
+    return (f"This thread closes, and the team voice channels are removed, in about {m} minutes."
+            if m > 0 else "")
 
 
 def _who(p: Player | None) -> str:
@@ -104,7 +105,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
         async with SessionLocal() as session:
             qc = await settings.queue_channel_id(session, str(inter.guild_id))
             if await game_channel.lobby_for_channel(session, str(inter.guild_id), inter.channel_id):
-                return False            # a game's private channel is fine for that game's commands
+                return False            # a game's private thread is fine for that game's commands
         msg = settings.wrong_channel_message(qc, inter.channel_id or 0)
         if msg is None:
             return False
@@ -119,26 +120,41 @@ class LobbyCog(commands.Cog, name="Lobby"):
     # ------------------------------------------------------------------ #
 
     async def _lobby_here(self, session, inter: discord.Interaction):
-        """In a game's private channel, that game's lobby; anywhere else, the server's open lobby."""
+        """In a game's private thread, that game's lobby; anywhere else, the server's open lobby."""
         here = await game_channel.lobby_for_channel(session, str(inter.guild_id), inter.channel_id)
         return here or await lobby_manager.get_active_lobby(session, str(inter.guild_id))
 
-    def _game_channel(self, lobby):
-        return self.bot.get_channel(int(lobby.game_channel_id)) if lobby.game_channel_id else None
+    async def _game_channel(self, lobby):
+        """The lobby's private thread, if it has one."""
+        guild = self.bot.get_guild(int(lobby.guild_id))
+        if guild is None or not lobby.game_channel_id:
+            return None
+        return await game_channel.find(guild, lobby.game_channel_id)
 
     async def open_game_space(self, session, lobby):
-        """Create the lobby's private channel if we can. Never breaks the lobby if we can't."""
+        """Create the lobby's private thread if we can. Never breaks the lobby if we can't."""
         guild = self.bot.get_guild(int(lobby.guild_id))
         if guild is None:
             return None
         try:
             return await game_channel.create(guild, session, lobby)
         except discord.HTTPException as e:
-            log.warning("could not create game channel for lobby %s: %s", lobby.id, e)
+            log.warning("could not create game thread for lobby %s: %s", lobby.id, e)
+            return None
+
+    async def open_team_voice(self, session, lobby):
+        """Blue and Red voice for this game. Never breaks the lobby if we can't."""
+        guild = self.bot.get_guild(int(lobby.guild_id))
+        if guild is None:
+            return None
+        try:
+            return await game_channel.open_team_voice(guild, session, lobby)
+        except discord.HTTPException as e:
+            log.warning("could not create team voice for lobby %s: %s", lobby.id, e)
             return None
 
     async def post_to_game(self, lobby, content: str | None = None, embeds_: list | None = None) -> bool:
-        ch = self._game_channel(lobby)
+        ch = await self._game_channel(lobby)
         if ch is None:
             return False
         try:
@@ -146,7 +162,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
                           allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
             return True
         except discord.HTTPException as e:
-            log.warning("could not post in game channel %s: %s", lobby.game_channel_id, e)
+            log.warning("could not post in game thread %s: %s", lobby.game_channel_id, e)
             return False
 
     async def _mentions(self, session, lobby) -> str:
@@ -248,7 +264,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
             await self.announce_teams(session, lobby, names, public=inter.followup)
 
     async def start_captain_space(self, session, lobby, cap1, cap2, public, header: str = "Captain draft!"):
-        """Captain draft begins: it happens in the private channel if there is one."""
+        """Captain draft begins: it happens in the private thread if there is one."""
         text = (f"Blue captain: {_who(cap1)}\nRed captain: {_who(cap2)}\n\n"
                 f"{_who(cap1)} picks first with `/inhouse pick` (snake order 1-2-2-1-1-2-2-1). "
                 f"Not the captains you wanted? The host can run `/inhouse captains`.")
@@ -257,16 +273,17 @@ class LobbyCog(commands.Cog, name="Lobby"):
         ch = await self.open_game_space(session, lobby)
         if ch is not None:
             await self.post_to_game(lobby, f"{await self._mentions(session, lobby)}\n**{header}** "
-                                           f"This channel is just for this lobby's players and staff.\n{text}{filler}")
+                                           f"This thread is just for this lobby's players and staff.\n{text}{filler}")
             await public.send(f"**{header}** Lobby #{lobby.id}'s draft is happening in {ch.mention}.")
         else:
             await public.send(f"**{header}**\n{text}{filler}")
 
     async def announce_teams(self, session, lobby, names, public=None):
         """
-        Teams are set. The private channel gets everything: mentions, teams, and how to get
+        Teams are set. The private thread gets everything: mentions, teams, and how to get
         into the game (password or tournament code) plus draft links. The queue channel gets
-        a summary with nothing secret in it. Without a private channel, players are DMed.
+        a summary with nothing secret in it. Without a private thread, players are DMed.
+        Each team also gets its own voice channel.
         """
         from bot.services.riot_api import RiotClient
         ratings = await lobby_manager.lobby_ratings(session, lobby)
@@ -289,6 +306,9 @@ class LobbyCog(commands.Cog, name="Lobby"):
         join = embeds.join_embed(lobby, creator)
         extra = f"\n{info.note}" if info.note else ""
 
+        voice = await self.open_team_voice(session, lobby)
+        if voice:
+            extra += f"\nTeam voice: {voice[0].mention} and {voice[1].mention}. Only your own team can join."
         ch = await self.open_game_space(session, lobby)
         if ch is not None and await self.post_to_game(
                 lobby, f"{await self._mentions(session, lobby)}\n{header}{note}{extra}", [teams, join]):
@@ -298,6 +318,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
             summary = f"{header}{note}\nPlayers were sent the lobby details by DM."
             if missed:
                 summary += f" Couldn't DM: {', '.join(missed)}. Ask the host for the details."
+        if voice:
+            summary += f"\nTeam voice: {voice[0].mention} (blue) and {voice[1].mention} (red)."
         if public is not None:
             await public.send(summary, embed=teams)
         else:
@@ -306,7 +328,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
                 await queue.send(summary, embed=teams)
 
     async def _dm_join_info(self, session, lobby, join) -> list[str]:
-        """Fallback when there is no private channel. Returns who couldn't be DMed."""
+        """Fallback when there is no private thread. Returns who couldn't be DMed."""
         missed = []
         for lp in lobby.players:
             p = await session.get(Player, lp.player_id)
@@ -594,7 +616,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
             creator = await session.get(Player, lobby.join_creator_id) if lobby.join_creator_id else None
             join = embeds.join_embed(lobby, creator.discord_username if creator else None)
             if await self.post_to_game(lobby, "**New draft room.**", [join]):
-                where = self._game_channel(lobby)
+                where = await self._game_channel(lobby)
                 await inter.followup.send(f"Draft room ready. The links are in {where.mention}.")
             else:
                 await inter.followup.send("Draft room ready.", embed=join, ephemeral=True)

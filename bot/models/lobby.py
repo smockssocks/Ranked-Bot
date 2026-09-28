@@ -19,8 +19,11 @@ class Lobby(Base):
     # waiting / drafting / active / completed / cancelled
     max_players: Mapped[int] = mapped_column(Integer, server_default="10")
     tournament_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Private channel for this game's players and staff, and how to get into the custom game.
+    # Private thread for this game's players and staff, and how to get into the custom game.
     game_channel_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Temporary Blue / Red voice channels, removed after the game.
+    team1_voice_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    team2_voice_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     join_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     join_password: Mapped[str | None] = mapped_column(String(32), nullable=True)
     join_creator_id: Mapped[int | None] = mapped_column(Integer, nullable=True)   # player who makes the lobby

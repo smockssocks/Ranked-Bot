@@ -81,6 +81,51 @@ def scan_raw_file() -> list[str]:
     return problems
 
 
+async def check_tournament(config, host: str) -> None:
+    """
+    Ask Riot whether the key may make tournament codes, without creating anything: look up a
+    code that can't exist. 403 means no Tournament API access; 400 or 404 mean the key got
+    past the access check.
+    """
+    import aiohttp
+    hr("Tournament codes")
+    key = config.tournament_api_key()
+    label = "RIOT_TOURNAMENT_API_KEY" if config.RIOT_TOURNAMENT_API_KEY else "RIOT_API_KEY"
+    if not key:
+        print("  Off. Games use a lobby name and password, which works fine.")
+        print("  To use real tournament codes, see TOURNAMENT-CODES.md.")
+        key, label = config.RIOT_API_KEY, "RIOT_API_KEY"
+        print("  Checking anyway whether your main key could make them...")
+    url = f"https://{host}/lol/tournament/v5/codes/NA0000-ACCESSCHECK"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers={"X-Riot-Token": key},
+                             timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                status = resp.status
+    except Exception as e:
+        print(f"  [!]  Could not ask Riot about tournament access: {e}")
+        return
+    print(f"  Riot replied: HTTP {status} for {label}")
+    if status in (400, 404):
+        print(f"  [OK]  {label} has Tournament API access. Tournament codes will work.")
+        if not config.tournament_api_key():
+            print("        Turn them on with TOURNAMENT_CODES=true in .env, then restart the bot.")
+        from bot.services.game_channel import callback_problem
+        problem = callback_problem(config.RIOT_TOURNAMENT_CALLBACK_URL)
+        if problem:
+            print(f"  [FIX] {problem}")
+    elif status in (401, 403):
+        print(f"  [--]  {label} does NOT have Tournament API access.")
+        print("        Development and Personal keys never do. You need a Production key")
+        print("        that Riot approved for tournaments. TOURNAMENT-CODES.md explains how.")
+        if config.tournament_api_key():
+            print("        Until then the bot falls back to lobby passwords, so games still work.")
+    elif status == 429:
+        print("  [!]  Rate limited. Try again in a minute.")
+    else:
+        print("  [!]  Unexpected reply. Tournament access is unknown.")
+
+
 async def main() -> int:
     print()
     hr("RIOT API KEY CHECK")
@@ -185,6 +230,8 @@ async def main() -> int:
     if status in (200, 404):
         # 404 just means that test account name was not found; the KEY worked.
         print("  [OK]  YOUR KEY WORKS. Riot accepted it.")
+        print()
+        await check_tournament(config, host)
         print()
         if problems:
             print("  Other things worth tidying up:")

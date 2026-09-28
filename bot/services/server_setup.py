@@ -35,6 +35,9 @@ REMEMBER_PREFIX = "setup:"
 
 # Permissions the bot needs on top of the basic invite to build the server.
 REQUIRED_PERMISSIONS = ("manage_channels", "manage_roles", "manage_messages")
+# And to run each game's private thread and team voice channels.
+GAME_PERMISSIONS = ("create_private_threads", "send_messages_in_threads", "manage_threads",
+                    "move_members", "connect")
 BASE_INVITE_PERMISSIONS = 117824   # view, send, embed, attach, read history, react
 
 
@@ -95,9 +98,15 @@ def missing_permissions(perms: discord.Permissions) -> list[str]:
     return [p for p in REQUIRED_PERMISSIONS if not getattr(perms, p)]
 
 
+def missing_game_permissions(perms: discord.Permissions) -> list[str]:
+    if perms.administrator:
+        return []
+    return [p for p in GAME_PERMISSIONS if not getattr(perms, p)]
+
+
 def invite_permissions() -> discord.Permissions:
     p = discord.Permissions(BASE_INVITE_PERMISSIONS)
-    for name in REQUIRED_PERMISSIONS:
+    for name in REQUIRED_PERMISSIONS + GAME_PERMISSIONS:
         setattr(p, name, True)
     return p
 
@@ -120,6 +129,9 @@ def _only_what_bot_has(ow: discord.PermissionOverwrite, have: discord.Permission
 
 
 BOT_ACCESS = dict(view_channel=True, send_messages=True, embed_links=True, read_message_history=True)
+# In the queue channel the bot also opens a private thread per game. Players are blocked from
+# making threads there, and that block would hit the bot too without its own exception.
+BOT_THREAD_ACCESS = dict(create_private_threads=True, send_messages_in_threads=True, manage_threads=True)
 
 
 def overwrites_for(access: str, guild: Any, mod_role: Any | None, have: discord.Permissions) -> dict:
@@ -128,9 +140,10 @@ def overwrites_for(access: str, guild: Any, mod_role: Any | None, have: discord.
         return {}
     if access in ("readonly", "commands"):
         # Players can read and use slash commands and buttons, but not type. The bot can post.
+        bot = dict(BOT_ACCESS, **BOT_THREAD_ACCESS) if access == "commands" else BOT_ACCESS
         raw = {everyone: discord.PermissionOverwrite(send_messages=False, create_public_threads=False,
                                                      create_private_threads=False),
-               me: discord.PermissionOverwrite(**BOT_ACCESS)}
+               me: discord.PermissionOverwrite(**bot)}
     elif access == "staff":
         raw = {everyone: discord.PermissionOverwrite(view_channel=False),
                me: discord.PermissionOverwrite(**BOT_ACCESS)}
@@ -270,7 +283,9 @@ async def build(guild: Any, session: AsyncSession) -> Report:
     role = p.role
     if role is None:
         try:
-            perms = discord.Permissions(manage_messages=bool(have.manage_messages or have.administrator))
+            # Manage Threads lets mods see every private game thread.
+            perms = discord.Permissions(manage_messages=bool(have.manage_messages or have.administrator),
+                                        manage_threads=bool(have.manage_threads or have.administrator))
             role = await guild.create_role(name=MOD_ROLE_NAME, permissions=perms, mentionable=False, reason=REASON)
             report.created.append(f"@{MOD_ROLE_NAME} role")
         except discord.HTTPException as e:

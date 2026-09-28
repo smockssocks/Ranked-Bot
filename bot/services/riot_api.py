@@ -303,7 +303,7 @@ class RiotClient:
             platform_host,
             "/lol/tournament/v5/providers",
             payload,
-            api_key=_cfg.RIOT_TOURNAMENT_API_KEY or _cfg.RIOT_API_KEY,
+            api_key=_cfg.tournament_api_key() or _cfg.RIOT_API_KEY,
         )
         return int(result)
 
@@ -315,7 +315,7 @@ class RiotClient:
             platform_host,
             "/lol/tournament/v5/tournaments",
             payload,
-            api_key=_cfg.RIOT_TOURNAMENT_API_KEY or _cfg.RIOT_API_KEY,
+            api_key=_cfg.tournament_api_key() or _cfg.RIOT_API_KEY,
         )
         return int(result)
 
@@ -347,16 +347,20 @@ class RiotClient:
             platform_host,
             f"/lol/tournament/v5/codes?tournamentId={tournament_id}&count=1",
             payload,
-            api_key=_cfg.RIOT_TOURNAMENT_API_KEY or _cfg.RIOT_API_KEY,
+            api_key=_cfg.tournament_api_key() or _cfg.RIOT_API_KEY,
         )
         return codes[0]
 
-    async def get_match_ids_for_tournament_code(self, tournament_code: str) -> list[str]:
-        platform_host = _platform_host()
-        path = f"/lol/tournament/v5/codes/{tournament_code}/ids"
-        return await self._get(
-            platform_host,
-            path,
-            api_key=_cfg.RIOT_TOURNAMENT_API_KEY or _cfg.RIOT_API_KEY,
-        )
+    async def tournament_access(self) -> int:
+        """
+        Ask Riot, without creating anything, whether the tournament key may use tournament-v5.
+        Looks up a code that cannot exist: 403 means no tournament access, while 400/404 mean
+        the key got past Riot's access check. Returns the HTTP status.
+        """
+        try:
+            await self._get(_platform_host(), "/lol/tournament/v5/codes/NA0000-ACCESSCHECK",
+                            api_key=_cfg.tournament_api_key() or _cfg.RIOT_API_KEY)
+            return 200
+        except RiotAPIError as e:
+            return e.status
 

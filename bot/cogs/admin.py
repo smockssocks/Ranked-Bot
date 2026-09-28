@@ -344,7 +344,8 @@ class AdminCog(commands.Cog, name="Admin"):
                           color=discord.Color.blurple())
         create = [f"{server_setup.label(i.spec)}: {i.spec.purpose}" for i in p.to_create]
         if p.role is None:
-            create.insert(0, f"@{server_setup.MOD_ROLE_NAME} role: can see STAFF channels and use /flags")
+            create.insert(0, f"@{server_setup.MOD_ROLE_NAME} role: can see STAFF channels, every game thread, "
+                             f"and use /flags")
         reuse = [server_setup.label(i.spec, i.existing) for i in p.to_reuse]
         if p.role is not None:
             reuse.insert(0, f"@{p.role.name} role")
@@ -359,7 +360,16 @@ class AdminCog(commands.Cog, name="Admin"):
         e.add_field(name="Bot settings it will point at these channels", value="\n".join(wiring), inline=False)
         e.add_field(name="Also", value="Posts the player guide in #how-to-play and pins it. "
                                        "#inhouse-queue is commands-only so the lobby post never gets buried; "
-                                       "players chat in #inhouse-chat.", inline=False)
+                                       "players chat in #inhouse-chat. Each game gets a private thread under "
+                                       "#inhouse-queue and its own Blue and Red voice channels.", inline=False)
+        game_missing = server_setup.missing_game_permissions(guild.me.guild_permissions)
+        if game_missing:
+            names = ", ".join(server_setup.pretty_permission(m) for m in game_missing)
+            e.add_field(name="Missing for game threads and team voice",
+                        value=f"I don't have {names}. Setup still works, but without these games fall back to "
+                              f"DMs and nobody gets moved into team voice. Fix it by opening "
+                              f"[this invite link]({server_setup.invite_url(self.bot.application_id)}), "
+                              f"picking this server and approving.", inline=False)
         queue_item = next(i for i in p.items if i.spec.key == "inhouse_queue")
         if lobby is not None and (queue_item.existing is None or int(lobby.channel_id) != queue_item.existing.id):
             e.add_field(name="Heads up",

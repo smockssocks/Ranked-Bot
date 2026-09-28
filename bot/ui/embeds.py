@@ -46,7 +46,9 @@ def lobby_embed(lobby: Lobby, names: dict[int, str], host_mention: str) -> disco
         e.add_field(name="Queue", value="\n".join(lines), inline=False)
     else:
         e.add_field(name="Queue", value="Nobody yet. Hit **Join**.", inline=False)
-    e.set_footer(text=f"Host: {host_mention} • /queue also works")
+    # Mentions only render in descriptions and field values, never in footers or titles.
+    e.add_field(name="Host", value=host_mention, inline=False)
+    e.set_footer(text="Press Join, or use /queue")
     return e
 
 
@@ -166,7 +168,7 @@ def flag_embed(flag, player_name: str, matched_name: str | None) -> discord.Embe
 
 
 def join_embed(lobby: Lobby, creator_name: str | None) -> discord.Embed:
-    """How to get into the custom game. Only ever posted in the lobby's private channel."""
+    """How to get into the custom game. Only ever posted in the lobby's private thread."""
     e = discord.Embed(title="Getting into the game", color=discord.Color.gold())
     slots = ("Take the slots in **pick order**, Pick 1 at the top of your team, so champ select runs in the right order."
              if lobby.mode == "pick_order" else
@@ -188,5 +190,5 @@ def join_embed(lobby: Lobby, creator_name: str | None) -> discord.Embed:
     if lobby.drafter_links:
         parts = [f"[{k.capitalize()}]({v})" for k, v in lobby.drafter_links.items()]
         e.add_field(name="Draft (drafter.lol)", value=" • ".join(parts), inline=False)
-    e.set_footer(text="Keep this in this channel. Results are picked up automatically after the game.")
+    e.set_footer(text="Keep this in this thread. Results are picked up automatically after the game.")
     return e

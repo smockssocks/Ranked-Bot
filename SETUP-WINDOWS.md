@@ -64,8 +64,11 @@ into it as you go.
    just copied, then pick your server and authorise it:
 
    ```
-   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applications.commands&permissions=268561488
+   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applications.commands&permissions=361063640144
    ```
+
+   **Already added the bot before?** Open this link again anyway, pick your server and
+   approve. It keeps everything and adds the permissions for game threads and team voice.
 
 ### Your server ID
 

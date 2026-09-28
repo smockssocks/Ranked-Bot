@@ -96,6 +96,7 @@ prefers containers on a Linux host.
    channels, and posts and pins the player guide. It shows a preview first, only ever adds
    things, and reuses any channel you already have with the same name. It needs Manage
    Channels, Manage Roles and Manage Messages, and gives you a one-click link if they're missing.
+   It also warns if the bot is missing what game threads and team voice need.
 3. Give your moderators the **@Inhouse Mod** role.
 4. Everyone runs `/link GameName#TAG` once. Nobody can queue before linking.
 
@@ -122,6 +123,11 @@ Run the test suite any time with `pytest`. It needs no network, Discord or keys.
 
    Admins choose which of these hosts may open with `/admin modes`. Hosts can add
    `casual:True` to `/inhouse create` for a game that posts stats but changes nobody's LP.
+
+   The players get a private thread under the queue channel with the teams and how to get
+   into the game: a **tournament code** if you have Riot's approval
+   ([TOURNAMENT-CODES.md](TOURNAMENT-CODES.md)), otherwise a lobby name and password. Each
+   team gets its own voice channel. See [Game threads and team voice](#game-threads-and-team-voice).
 4. If `DRAFTER_API_KEY` is set, the teams embed includes **blue / red / spectator** draft links.
    Captains draft on drafter.lol; the bot posts picks and bans when the draft completes. Create
    the custom lobby in the client as **Tournament Draft** and lock in the same champions.
@@ -342,27 +348,56 @@ is off, edit `ROLE_WEIGHTS` in `rating_engine.py`, compare with `/admin baseline
 
 ---
 
-## Private game channels
+## Game threads and team voice
 
-When a lobby starts, the bot opens `#game-N` for that game. Only its players, the host, the
-@Inhouse Mod role and staff roles (anything with Manage Server; Administrators see all channels)
-can see it. The bot pings the players there and posts:
+When a lobby starts, the bot opens a **private thread under the queue channel**, named after
+the host, e.g. "Danman's inhouse" ("Danman's casual inhouse" for casual games). No numbers.
+The bot adds the players and the host. Staff see it too: Discord shows every private thread to
+anyone with **Manage Threads** (Administrators, and the @Inhouse Mod role made by
+`/admin setup`). Staff without Manage Threads are added to the thread by the bot. The bot
+pings the players there and posts:
 
 - the teams and pick positions (in a captain draft, the draft itself happens there);
 - **how to get into the game**, never shown publicly:
-  - with a Riot **tournament key** (`RIOT_TOURNAMENT_API_KEY`, Production keys only), a real
-    tournament code locked to exactly those players (tournament-v5, `allowedParticipants`);
+  - with tournament codes on, a real tournament code locked to exactly those players
+    (see [TOURNAMENT-CODES.md](TOURNAMENT-CODES.md));
   - otherwise a generated custom lobby name and password, and which player creates the lobby
     (the host if they're playing, else blue side's first pick);
 - the drafter.lol links, and draft picks and bans when the draft finishes;
 - the result when the game is recorded, or a notice if the lobby is cancelled.
 
-The public queue channel gets the teams with nothing secret in them and a link to the private
-channel. Lobby commands (`/inhouse pick`, `/inhouse submit`, …) work inside a game's channel and
-act on that game. The channel is deleted `GAME_CHANNEL_CLEANUP_MINUTES` (default 15) after the
-game ends; set it to 0 to keep them, or `GAME_CHANNELS_ENABLED=false` to turn the feature off. If
-the bot can't create channels (it needs Manage Channels and Manage Roles), players are sent the
-details by DM instead.
+Each team also gets its own **temporary voice channel** ("Blue · Danman's inhouse" and
+"Red · Danman's inhouse") in the INHOUSES category. Everyone can see them, but only that team
+and staff can join. Players who are already in a voice channel when teams are set are moved
+into their team's channel (anyone AFK or not in voice is left alone).
+
+The public queue channel gets the teams with nothing secret in them, plus links to the thread
+and the voice channels. Lobby commands (`/inhouse pick`, `/inhouse submit`, …) work inside a
+game's thread and act on that game.
+
+`GAME_CHANNEL_CLEANUP_MINUTES` (default 15) after the game ends, the thread is archived and
+locked (staff can still read it back), anyone in team voice is moved back to the Lobby voice
+channel, and the team voice channels are deleted. Set it to 0 to keep everything.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `GAME_CHANNELS_ENABLED` | `true` | Private game threads. Off: players get the details by DM. |
+| `TEAM_VOICE_ENABLED` | `true` | Temporary Blue and Red voice per game. |
+| `TEAM_VOICE_AUTO_MOVE` | `true` | Move players already in voice into their team's channel. |
+| `GAME_CHANNEL_CLEANUP_MINUTES` | `15` | When to close the thread and remove team voice. |
+
+**Permissions.** Threads need Create Private Threads, Send Messages in Threads and Manage
+Threads; team voice needs Manage Channels, Manage Roles, Connect and Move Members. This invite
+link asks for all of them (put your bot's Client ID in):
+
+```
+https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applications.commands&permissions=361063640144
+```
+
+**If you invited the bot before this update, open that link again, pick your server and
+approve.** It keeps everything and only adds the new
+permissions. `/admin setup` tells you if any are missing. The queue channel stops players
+starting threads; the bot gives itself an exception there automatically.
 
 ## Queue bans
 
@@ -428,7 +463,7 @@ download, so extracting an update over the same folder keeps everyone linked.
 
 | Symptom | Fix |
 | --- | --- |
-| Slash commands do not appear | Check `DISCORD_GUILD_ID`; re-invite with the URL above (it must include `applications.commands`). |
+| Slash commands do not appear | Check `DISCORD_GUILD_ID`; re-invite with the URL in [Game threads and team voice](#game-threads-and-team-voice) (it must include `applications.commands`). |
 | Bot exits at start with an intents error | Enable Server Members and Message Content intents in the developer portal. |
 | `/link` says "Riot API 403" | Development key expired (24h) or wrong `RIOT_REGION` / `RIOT_PLATFORM`. |
 | `/link` says "Riot API 404" | Riot ID typo. Format is `GameName#TAG`, the tag is the part after # in the client. |

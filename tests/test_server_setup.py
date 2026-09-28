@@ -195,7 +195,7 @@ async def test_one_failure_does_not_stop_the_rest(db):
 
 def test_overwrites_only_use_permissions_the_bot_has():
     g = FakeGuild()
-    lean = ss.invite_permissions()                                    # no thread permissions
+    lean = ss.invite_permissions()                                    # no Create Public Threads
     ow = ss.overwrites_for("readonly", g, None, lean)[g.default_role]
     assert ow.send_messages is False and ow.create_public_threads is None
     rich = ss.overwrites_for("readonly", g, None, full_perms())[g.default_role]
