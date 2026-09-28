@@ -205,3 +205,43 @@ async def test_queue_channel_setting_roundtrip(db):
         assert settings.wrong_channel_message(555, 42) is not None
         await settings.set_setting(session, "g", settings.KEY_QUEUE_CHANNEL, "")   # cleared
         assert await settings.queue_channel_id(session, "g") == 0
+
+
+# --- force queue / force remove --------------------------------------------
+
+async def test_host_can_force_queue_and_remove(db):
+    async with db() as session:
+        players = await _players(session)
+        lobby = await lm.create_lobby(session, "g", "c", players[0].discord_id)          # player 1 hosts
+        await lm.force_queue(session, lobby, players[0].discord_id, players[4].discord_id)
+        assert any(lp.player_id == players[4].id for lp in lobby.players)
+        with pytest.raises(LobbyError, match="already in the queue"):
+            await lm.force_queue(session, lobby, players[0].discord_id, players[4].discord_id)
+        with pytest.raises(LobbyError, match="host or an admin"):                         # not the host
+            await lm.force_queue(session, lobby, players[2].discord_id, players[5].discord_id)
+        await lm.force_queue(session, lobby, players[2].discord_id, players[5].discord_id, is_admin=True)
+        removed = await lm.force_remove(session, lobby, players[0].discord_id, players[4].discord_id)
+        assert removed.id == players[4].id and not any(lp.player_id == players[4].id for lp in lobby.players)
+        with pytest.raises(LobbyError, match="not in this lobby"):
+            await lm.force_remove(session, lobby, players[0].discord_id, players[4].discord_id)
+
+
+async def test_force_queue_needs_a_linked_account_and_room(db):
+    async with db() as session:
+        players = await _players(session)
+        session.add(Player(discord_id="999", discord_username="nolink"))                  # never ran /link
+        await session.commit()
+        lobby = await lm.create_lobby(session, "g", "c", "host")
+        with pytest.raises(LobbyError, match="hasn't linked"):
+            await lm.force_queue(session, lobby, "host", "999")
+        with pytest.raises(LobbyError, match="hasn't linked"):
+            await lm.force_queue(session, lobby, "host", "12345")                         # not even registered
+        for p in players:
+            await lm.force_queue(session, lobby, "host", p.discord_id)
+        session.add(Player(discord_id="11", discord_username="u11", riot_puuid="puuid-11"))
+        await session.commit()
+        with pytest.raises(LobbyError, match="full"):
+            await lm.force_queue(session, lobby, "host", "11")
+        await lm.make_teams(session, lobby)
+        with pytest.raises(LobbyError, match="Teams are already made"):
+            await lm.force_remove(session, lobby, "host", players[0].discord_id)

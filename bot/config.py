@@ -5,7 +5,12 @@ can import the package. main.py validates the values it truly needs at startup.
 """
 from __future__ import annotations
 import os
+from pathlib import Path
 from dotenv import load_dotenv
+
+# The folder containing the bot (the one with START-BOT.bat). Everything the bot keeps
+# on disk lives here, whatever folder it happens to be started from.
+ROOT = Path(__file__).resolve().parent.parent
 
 # override=True matters: without it, a variable already present in the operating
 # system environment silently wins over the .env file. People who once set
@@ -58,7 +63,23 @@ RIOT_TOURNAMENT_API_KEY = os.getenv("RIOT_TOURNAMENT_API_KEY", "")
 RIOT_TOURNAMENT_CALLBACK_URL = os.getenv("RIOT_TOURNAMENT_CALLBACK_URL", "https://example.com/riot-callback")
 
 # --- Database --------------------------------------------------------------
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ranked_bot.db")
+def anchor_sqlite_url(url: str, root: Path = ROOT) -> str:
+    """
+    A relative SQLite path like ./ranked_bot.db is normally resolved against the folder
+    the program was STARTED from. Start the bot from anywhere else and it silently opens
+    a brand new, empty database, so every player looks unlinked. Pin relative paths to
+    the bot's own folder instead. Absolute paths and non-SQLite databases are unchanged.
+    """
+    if not url.startswith("sqlite") or ":///" not in url:
+        return url
+    scheme, _, path = url.partition(":///")
+    if not path or path.startswith(":memory:") or Path(path).is_absolute():
+        return url
+    return f"{scheme}:///{(root / path).resolve().as_posix()}"
+
+
+DATABASE_URL = anchor_sqlite_url(os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ranked_bot.db"))
+BACKUP_KEEP = _int("BACKUP_KEEP", 14)   # database copies kept in the backups folder
 
 # --- Drafter.lol -----------------------------------------------------------
 DRAFTER_API_KEY = os.getenv("DRAFTER_API_KEY", "")

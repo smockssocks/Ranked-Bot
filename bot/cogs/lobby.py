@@ -288,6 +288,54 @@ class LobbyCog(commands.Cog, name="Lobby"):
                 await inter.followup.send(f"Picked **{player.display_name}**. Available: {', '.join(pool)}\n"
                                           f"<@{cap.discord_id if cap else '?'}>, your pick.")
 
+    @inhouse.command(name="forcequeue", description="Host/admin: put a player into the queue for them.")
+    @app_commands.describe(player="Who to add", role="Their preferred role (balanced and captain lobbies only)",
+                           secondary="Their backup role")
+    @app_commands.choices(role=ROLE_CHOICES, secondary=ROLE_CHOICES)
+    async def inhouse_forcequeue(self, inter: discord.Interaction, player: discord.Member,
+                                 role: app_commands.Choice[str] | None = None,
+                                 secondary: app_commands.Choice[str] | None = None):
+        if await self._wrong_channel(inter):
+            return
+        async with SessionLocal() as session:
+            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            if lobby is None:
+                await inter.response.send_message("No open lobby.", ephemeral=True)
+                return
+            try:
+                await lobby_manager.force_queue(session, lobby, str(inter.user.id), str(player.id), _is_admin(inter),
+                                                role.value if role else None, secondary.value if secondary else None)
+            except LobbyError as e:
+                await inter.response.send_message(str(e), ephemeral=True)
+                return
+            n = len(lobby.players)
+            await inter.response.send_message(
+                f"{inter.user.mention} added {player.mention} to the queue ({n}/{lobby.max_players}).")
+            await self.refresh_lobby_message(session, lobby)
+            if n >= lobby.max_players:
+                await inter.followup.send(f"**Lobby #{lobby.id} is full!** <@{lobby.host_discord_id}> "
+                                          f"press **Start** or run `/inhouse start`.")
+
+    @inhouse.command(name="forceremove", description="Host/admin: take a player out of the queue.")
+    @app_commands.describe(player="Who to remove")
+    async def inhouse_forceremove(self, inter: discord.Interaction, player: discord.Member):
+        if await self._wrong_channel(inter):
+            return
+        async with SessionLocal() as session:
+            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            if lobby is None:
+                await inter.response.send_message("No open lobby.", ephemeral=True)
+                return
+            try:
+                await lobby_manager.force_remove(session, lobby, str(inter.user.id), str(player.id), _is_admin(inter))
+            except LobbyError as e:
+                await inter.response.send_message(str(e), ephemeral=True)
+                return
+            await inter.response.send_message(
+                f"{inter.user.mention} removed {player.mention} from the queue "
+                f"({len(lobby.players)}/{lobby.max_players}).")
+            await self.refresh_lobby_message(session, lobby)
+
     @inhouse.command(name="role", description="Captain/host: move a teammate to a role (swaps if taken).")
     @app_commands.choices(role=ROLE_CHOICES)
     async def inhouse_role(self, inter: discord.Interaction, player: discord.Member, role: app_commands.Choice[str]):

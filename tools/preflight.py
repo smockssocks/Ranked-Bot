@@ -154,6 +154,31 @@ def check_env() -> None:
         print(f"    {'ON ' if on else 'off'}  {label}" + ("" if on else f"   ({note})"))
 
 
+def check_database() -> None:
+    """Informational only: where the players live, and a loud hint if the database looks new."""
+    try:
+        from bot import config
+        from bot.db.backup import linked_player_count, sqlite_file
+    except Exception:
+        return
+    db_file = sqlite_file(config.DATABASE_URL)
+    print()
+    if db_file is None:
+        print("  Database: external (Postgres). Back it up with your database host's tools.")
+        return
+    count = linked_player_count(db_file)
+    backups = sorted((config.ROOT / "backups").glob("*.db"))
+    print(f"  Database: {db_file}")
+    if count:
+        print(f"  [OK]   {count} linked player(s). Backups kept in: {config.ROOT / 'backups'} ({len(backups)} so far)")
+        return
+    print("  [!]    No linked players in this database yet.")
+    print("         First time running the bot? Ignore this.")
+    print("         Otherwise you are probably running a NEW COPY of the bot. Your players are in")
+    print("         the ranked_bot.db file in your OLD bot folder. Stop, copy that file (and .env)")
+    print("         into this folder, replacing the empty one, and start again.")
+
+
 def main() -> int:
     print()
     print("  Checking your setup")
@@ -161,6 +186,7 @@ def main() -> int:
     check_python()
     check_packages()
     check_env()
+    check_database()
     print()
     if not problems:
         print("  " + "-" * 44)

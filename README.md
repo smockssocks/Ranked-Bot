@@ -90,11 +90,14 @@ prefers containers on a Linux host.
 ### First things to do in Discord
 
 1. Type `/` in a channel and confirm `/link`, `/queue`, `/inhouse` and `/rank` appear.
-2. `/admin queuechannel channel:#inhouse-queue` so all queueing happens in one place.
-3. `/admin modchannel #mods` so smurf alerts have somewhere to go.
+2. **`/admin setup`** builds the server: INFORMATION, INHOUSES and STAFF categories, the queue,
+   chat, results and mod channels, Lobby / Blue Side / Red Side voice rooms, and an
+   **@Inhouse Mod** role. It wires the bot's queue, results and mod-alert settings to those
+   channels, and posts and pins the player guide. It shows a preview first, only ever adds
+   things, and reuses any channel you already have with the same name. It needs Manage
+   Channels, Manage Roles and Manage Messages, and gives you a one-click link if they're missing.
+3. Give your moderators the **@Inhouse Mod** role.
 4. Everyone runs `/link GameName#TAG` once. Nobody can queue before linking.
-5. Pin the player message from [docs/PLAYER-GUIDE.md](docs/PLAYER-GUIDE.md). Players can also
-   run `/help` at any time, which tells them what to do next and where your queue channel is.
 
 To test scoring without playing a fresh game, take any past 10-player custom from your match
 history and run `/admin submit 5650481942` with the number from its post-game screen.
@@ -145,6 +148,8 @@ test custom will not show up, so test the pipeline with `/admin submit` on a pas
 - **Casual lobbies** (`/inhouse create casual:True`) post results but never touch LP, the
   community role averages, or the anti-smurf checks.
 - `/inhouse teams`, `/inhouse status`, `/inhouse cancel`.
+- `/inhouse forcequeue @player` and `/inhouse forceremove @player` let the host or an admin
+  add someone to the queue, or take out someone who went AFK, while the lobby is filling.
 - Lobbies that never produce a game are auto-cancelled after `AUTO_DETECT_MAX_AGE_HOURS`.
 
 ### Automatic results
@@ -218,6 +223,7 @@ knows about you. `CHAT_PERSONA` in `.env` changes its personality.
 | `/admin reprocess GAME_ID` | Rollback + process again (after tuning the model). Most recent games only. |
 | `/admin reset @player` | Back to 1000 LP and placements. |
 | `/admin modes` | Choose which lobby modes hosts can open, the default mode, and whether casual lobbies are allowed. No options shows the current setup. |
+| `/admin setup` | Build the whole server layout, channels, voice rooms and mod role, and wire the bot to them. Preview first; additive only. |
 | `/admin queuechannel` | Lock every queue command and lobby button to one channel. Run it with no options to see the current setting, or `clear:True` to allow any channel. |
 | `/admin modchannel`, `/admin resultschannel` | Channels. |
 | `/admin baselines` | What the server currently considers average per role. |
@@ -332,6 +338,21 @@ is off, edit `ROLE_WEIGHTS` in `rating_engine.py`, compare with `/admin baseline
 `/admin reprocess` recent games.
 
 ---
+
+## Your data, backups and updating
+
+Everything the bot knows is in the database. With the default SQLite setup that is one file,
+**`ranked_bot.db`, in the bot's folder**: linked Riot accounts, ratings, game history, lobbies,
+server settings, smurf flags and chat memory. Keys live in `.env`. Neither is part of the
+download, so extracting an update over the same folder keeps everyone linked.
+
+- The database path is always resolved against the bot's own folder, whichever folder the bot
+  is started from, so it can never silently open a new empty database.
+- Every start copies the database into `backups/` using SQLite's backup API, keeping the newest
+  `BACKUP_KEEP` (default 14). Restore by stopping the bot and copying a backup over `ranked_bot.db`.
+- The startup check prints the database path and how many players are linked, and warns if it
+  looks empty, which is what you'd see after accidentally starting a fresh copy elsewhere.
+- Schema changes upgrade the existing database automatically on start.
 
 ## 5. Troubleshooting
 

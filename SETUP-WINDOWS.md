@@ -64,7 +64,7 @@ into it as you go.
    just copied, then pick your server and authorise it:
 
    ```
-   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applications.commands&permissions=117824
+   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applications.commands&permissions=268561488
    ```
 
 ### Your server ID
@@ -137,14 +137,65 @@ it is running. Leave the window open.** Closing it turns the bot off.
 1. Type `/` in any channel. You should see `/link`, `/queue`, `/inhouse`, `/rank`.
    If nothing appears, your `DISCORD_GUILD_ID` is wrong or the invite in Part 3 did not
    include `applications.commands`. Redo step 7 of the Discord section.
-2. Run `/admin modchannel #your-mod-channel` so smurf alerts have somewhere to go.
-3. Everyone who wants to play runs `/link` once, for example `/link Danman#NA1`.
+2. **Run `/admin setup`.** The bot shows a preview of everything it will build. Press
+   **Build it** and it creates:
+
+   | Category | Channels | Who can post |
+   | --- | --- | --- |
+   | INFORMATION | `#how-to-play`, `#announcements` | Staff only. The bot posts and pins the player guide in `#how-to-play`. |
+   | INHOUSES | `#inhouse-queue`, `#inhouse-chat`, `#match-results`, voice: Lobby, Blue Side, Red Side | Everyone chats in `#inhouse-chat`. The queue channel is commands only, so the lobby post never gets buried. Results are posted by the bot. |
+   | STAFF | `#mod-flags`, `#bot-admin` | Hidden from players. Visible to the new **@Inhouse Mod** role. |
+
+   It also points the bot at these channels: queues in `#inhouse-queue`, results in
+   `#match-results`, smurf alerts in `#mod-flags`.
+
+   Setup only ever **adds** things. It never deletes, renames or changes channels you
+   already have, and if you already have a channel with one of those names it uses yours.
+   Running it again only adds what is missing.
+
+   If it says it is **missing permissions**, it gives you a link to fix that in one click.
+   Your bot needs Manage Channels, Manage Roles and Manage Messages to build the server.
+3. Give your moderators the **@Inhouse Mod** role.
+4. Everyone who wants to play runs `/link` once, for example `/link Danman#NA1`.
    Nobody can join a queue until they have linked.
-4. Run `/howranked` and pin the result so people understand the LP system.
 
 To test that scoring works without playing a fresh game, find any past 10-player custom
 game and run `/admin submit` with the number from its post-game screen, for example
 `/admin submit 5650481942`. The bot adds the `NA1_` region part itself.
+
+---
+
+## Updating the bot without losing anyone
+
+**Every linked account, rating, game and setting lives in one file: `ranked_bot.db`**,
+in the same folder as `START-BOT.bat`. Your keys live in `.env` next to it. Neither file is
+in the download, so updating can't overwrite them, **as long as you update in the same folder.**
+
+To update:
+
+1. Close the bot's black window.
+2. Download the new ZIP and **extract it into the same folder you run the bot from.**
+   When Windows asks, choose **Replace the files in the destination**.
+3. Double-click `START-BOT.bat`.
+
+Nobody has to relink. Every time the bot starts, the setup check prints something like:
+
+```
+  Database: C:\...\ranked_bot.db
+  [OK]   14 linked player(s). Backups kept in: C:\...\backups
+```
+
+If that ever says **"No linked players"** when you know people have linked, you are running
+a fresh copy in a different folder. Close it, copy `ranked_bot.db` and `.env` from your old
+bot folder into the new one, and start again.
+
+**Automatic backups.** Every start saves a copy of the database into the `backups` folder,
+keeping the newest 14. To restore one: close the bot, copy the backup you want over
+`ranked_bot.db`, rename it to exactly `ranked_bot.db`, and start the bot.
+
+**Moving the bot to another folder** (a good idea, since Downloads gets cleaned out): move the
+whole folder, then delete the `.venv` folder inside it. `START-BOT.bat` rebuilds that on the
+next start. Your players come with you because `ranked_bot.db` moves with the folder.
 
 ---
 

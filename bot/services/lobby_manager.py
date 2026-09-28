@@ -123,6 +123,45 @@ async def dequeue_player(session: AsyncSession, lobby: Lobby, discord_id: str) -
     await session.refresh(lobby)
 
 
+def _require_host_or_admin(lobby: Lobby, requester_discord_id: str, is_admin: bool, action: str) -> None:
+    if lobby.host_discord_id != requester_discord_id and not is_admin:
+        raise LobbyError(f"Only the lobby host or an admin can {action}.")
+
+
+async def force_queue(session: AsyncSession, lobby: Lobby, requester_discord_id: str, target_discord_id: str,
+                      is_admin: bool = False, preferred_role: str | None = None,
+                      secondary_role: str | None = None) -> LobbyPlayer:
+    """Host or admin puts another player into the queue."""
+    _require_host_or_admin(lobby, requester_discord_id, is_admin, "force-queue players")
+    if lobby.status != "waiting":
+        raise LobbyError("Teams are already made, so nobody else can join this lobby.")
+    target = await session.scalar(select(Player).where(Player.discord_id == target_discord_id))
+    if target is None or target.riot_puuid is None:
+        raise LobbyError("That player hasn't linked a Riot account, so their games could not be scored. "
+                         "They need to run `/link` first, or an admin can use `/admin link`.")
+    if any(lp.player_id == target.id for lp in lobby.players):
+        raise LobbyError(f"{target.discord_username} is already in the queue.")
+    if len(lobby.players) >= lobby.max_players:
+        raise LobbyError("The lobby is full.")
+    return await queue_player(session, lobby, target_discord_id, preferred_role, secondary_role)
+
+
+async def force_remove(session: AsyncSession, lobby: Lobby, requester_discord_id: str, target_discord_id: str,
+                       is_admin: bool = False) -> Player:
+    """Host or admin takes a player out of the queue, e.g. someone who went AFK."""
+    _require_host_or_admin(lobby, requester_discord_id, is_admin, "remove players")
+    if lobby.status != "waiting":
+        raise LobbyError("Teams are already made. To change players, cancel the lobby and open a new one.")
+    target = await session.scalar(select(Player).where(Player.discord_id == target_discord_id))
+    lp = next((x for x in lobby.players if target and x.player_id == target.id), None)
+    if lp is None:
+        raise LobbyError("That player is not in this lobby.")
+    await session.delete(lp)
+    await session.commit()
+    await session.refresh(lobby)
+    return target
+
+
 # ------------------------------------------------------------------ #
 # Ratings lookup                                                       #
 # ------------------------------------------------------------------ #

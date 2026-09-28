@@ -11,10 +11,14 @@ from bot import config
 from bot.db.database import SessionLocal
 from bot.models.player import Player
 from bot.models.rating import PlayerRating, RoleBaseline
-from bot.services import settings, smurf_detector
+from bot.services import lobby_manager, server_setup, settings, smurf_detector
 from bot.services.game_processor import get_or_create_rating, process_match, reprocess_match, rollback_match
 from bot.services.riot_api import RiotAPIError, RiotClient, RiotUnavailable, friendly_error, normalize_match_id
 from bot.ui import embeds
+
+import logging
+
+log = logging.getLogger("ranked-bot.cogs.admin")
 
 
 async def link_account(session, member: discord.abc.User, riot_id: str) -> tuple[Player, object | None]:
@@ -50,6 +54,74 @@ async def link_account(session, member: discord.abc.User, riot_id: str) -> tuple
     await session.commit()
     flag = await smurf_detector.evaluate_link(session, p, summoner, entries)
     return p, flag
+
+
+def _cap(lines: list[str], limit: int = 1000) -> str:
+    out, used = [], 0
+    for ln in lines:
+        if used + len(ln) + 1 > limit:
+            out.append(f"...and {len(lines) - len(out)} more")
+            break
+        out.append(ln)
+        used += len(ln) + 1
+    return "\n".join(out) or "None"
+
+
+def setup_report_embed(r: server_setup.Report) -> discord.Embed:
+    ok = not r.failed
+    e = discord.Embed(title="Server setup complete" if ok else "Server setup finished with problems",
+                      color=discord.Color.green() if ok else discord.Color.orange())
+    e.add_field(name=f"Created ({len(r.created)})", value=_cap(r.created), inline=True)
+    e.add_field(name=f"Already there, left as is ({len(r.reused)})", value=_cap(r.reused), inline=True)
+    if r.settings:
+        e.add_field(name="Bot settings", value=_cap(r.settings), inline=False)
+    if r.guide:
+        e.add_field(name="Player guide", value=r.guide, inline=False)
+    if r.failed:
+        e.add_field(name="Could not do", value=_cap([f"{what}: {why}" for what, why in r.failed]), inline=False)
+    steps = [
+        f"Give your moderators the {r.role_mention or '@Inhouse Mod'} role so they can see the STAFF channels and use /flags.",
+        "Drag the categories into whatever order you like. Renaming channels is fine.",
+        "Run /admin modes to choose which lobby modes hosts can open.",
+        "Running /admin setup again only adds what is missing. A channel you delete will come back.",
+    ]
+    e.add_field(name="Next", value="\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1)), inline=False)
+    return e
+
+
+class SetupConfirmView(discord.ui.View):
+    """Build nothing until the admin who asked presses Build it."""
+
+    def __init__(self, invoker_id: int):
+        super().__init__(timeout=300)
+        self.invoker_id = invoker_id
+
+    async def interaction_check(self, inter: discord.Interaction) -> bool:
+        if inter.user.id != self.invoker_id:
+            await inter.response.send_message("Only the admin who ran /admin setup can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Build it", style=discord.ButtonStyle.success)
+    async def confirm(self, inter: discord.Interaction, _b: discord.ui.Button):
+        self.stop()
+        await inter.response.edit_message(content="Building your server. This takes a few seconds...",
+                                          embed=None, view=None)
+        try:
+            async with SessionLocal() as session:
+                report = await server_setup.build(inter.guild, session)
+        except Exception:
+            log.exception("server setup failed")
+            await inter.edit_original_response(
+                content="Setup stopped because of an unexpected error. It is logged in the bot's window. "
+                        "Anything already created was kept, and running /admin setup again will carry on.")
+            return
+        await inter.edit_original_response(content=None, embed=setup_report_embed(report))
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, inter: discord.Interaction, _b: discord.ui.Button):
+        self.stop()
+        await inter.response.edit_message(content="Cancelled. Nothing was changed.", embed=None, view=None)
 
 
 class AdminCog(commands.Cog, name="Admin"):
@@ -169,6 +241,53 @@ class AdminCog(commands.Cog, name="Admin"):
         async with SessionLocal() as session:
             await settings.set_setting(session, str(inter.guild_id), settings.KEY_MOD_CHANNEL, str(channel.id))
         await inter.response.send_message(f"Mod alerts will go to {channel.mention}.", ephemeral=True)
+
+    @admin.command(name="setup", description="Build the inhouse channels, voice rooms and mod role, and wire the bot up.")
+    async def admin_setup(self, inter: discord.Interaction):
+        guild = inter.guild
+        missing = server_setup.missing_permissions(guild.me.guild_permissions)
+        if missing:
+            names = ", ".join(f"**{server_setup.pretty_permission(m)}**" for m in missing)
+            await inter.response.send_message(
+                f"I can't build channels yet. I'm missing {names}.\n\n"
+                f"**Easiest fix:** open this link, pick this server, and approve. It keeps everything and just "
+                f"adds the permissions:\n{server_setup.invite_url(self.bot.application_id)}\n\n"
+                f"**Or:** Server Settings > Roles > my role (`{guild.me.top_role.name}`) and turn those on.\n"
+                f"Then run `/admin setup` again.", ephemeral=True)
+            return
+        async with SessionLocal() as session:
+            p = await server_setup.plan(guild, session)
+            current = {key: await settings.get_setting(session, str(guild.id), skey)
+                       for key, (skey, _) in server_setup.SETTINGS_WIRING.items()}
+            lobby = await lobby_manager.get_active_lobby(session, str(guild.id))
+        e = discord.Embed(title="Server setup: preview",
+                          description="Nothing changes until you press **Build it**. Setup only adds things. "
+                                      "It never deletes, renames or edits channels you already have.",
+                          color=discord.Color.blurple())
+        create = [f"{server_setup.label(i.spec)}: {i.spec.purpose}" for i in p.to_create]
+        if p.role is None:
+            create.insert(0, f"@{server_setup.MOD_ROLE_NAME} role: can see STAFF channels and use /flags")
+        reuse = [server_setup.label(i.spec, i.existing) for i in p.to_reuse]
+        if p.role is not None:
+            reuse.insert(0, f"@{p.role.name} role")
+        e.add_field(name=f"Will create ({len(create)})", value=_cap(create), inline=False)
+        if reuse:
+            e.add_field(name=f"Already there, will be used as is ({len(reuse)})", value=_cap(reuse), inline=False)
+        wiring = []
+        for key, (skey, what) in server_setup.SETTINGS_WIRING.items():
+            spec = next(s for s in server_setup.LAYOUT if s.key == key)
+            was = f" (currently <#{current[key]}>)" if current[key] else ""
+            wiring.append(f"{what}: #{spec.name}{was}")
+        e.add_field(name="Bot settings it will point at these channels", value="\n".join(wiring), inline=False)
+        e.add_field(name="Also", value="Posts the player guide in #how-to-play and pins it. "
+                                       "#inhouse-queue is commands-only so the lobby post never gets buried; "
+                                       "players chat in #inhouse-chat.", inline=False)
+        queue_item = next(i for i in p.items if i.spec.key == "inhouse_queue")
+        if lobby is not None and (queue_item.existing is None or int(lobby.channel_id) != queue_item.existing.id):
+            e.add_field(name="Heads up",
+                        value=f"There is an open lobby in <#{lobby.channel_id}>. Once queues move to "
+                              f"#inhouse-queue, cancel that lobby and open a new one there.", inline=False)
+        await inter.response.send_message(embed=e, view=SetupConfirmView(inter.user.id), ephemeral=True)
 
     @admin.command(name="modes", description="Choose which lobby modes hosts can open, the default, and casual lobbies.")
     @app_commands.describe(

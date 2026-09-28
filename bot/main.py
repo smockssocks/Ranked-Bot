@@ -184,8 +184,24 @@ def _friendly(title: str, lines: list[str]) -> None:
     print()
 
 
+def _backup() -> None:
+    from bot.db.backup import backup_database, linked_player_count, sqlite_file
+    db_file = sqlite_file(config.DATABASE_URL)
+    if db_file is None:
+        return
+    count = linked_player_count(db_file)
+    log.info("Database: %s (%s linked players)", db_file, "new" if count is None else count)
+    try:
+        dest = backup_database(db_file, config.ROOT / "backups", keep=config.BACKUP_KEEP)
+        if dest:
+            log.info("Backed up the database to %s", dest)
+    except Exception:
+        log.exception("Database backup failed; starting anyway")
+
+
 async def main():
     _validate()
+    _backup()
     bot = RankedBot()
     try:
         async with bot:

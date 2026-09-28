@@ -7,8 +7,9 @@ Two things here. **Part 1** is a message to paste into Discord for your players.
 
 ## Part 1: paste this into your server
 
-Post this in a `#how-to-play` or `#rules` channel and pin it. It fits in one Discord
-message. Replace `#inhouse-queue` with your actual queue channel.
+`/admin setup` posts and pins this for you in `#how-to-play`, with a clickable link to your
+queue channel. If you'd rather post it yourself, it fits in one Discord message; replace
+`#inhouse-queue` with your actual queue channel.
 
 ```
 **How to play inhouses** :trophy:
@@ -125,6 +126,10 @@ practice, or teaching a newcomer. Hosts open one with `/inhouse create casual:Tr
 4. Create the custom lobby in the League client, **Tournament Draft**, and have players
    take their slots in pick order, top slot first.
 5. Play. The bot posts results and closes the lobby by itself.
+
+Someone not at their keyboard? `/inhouse forcequeue @player` adds them for you, and
+`/inhouse forceremove @player` takes out someone who went AFK. Both work while the lobby is
+filling, for the host or an admin.
 
 If the bot somehow misses a game, run `/inhouse submit` in the queue channel with the game ID
 from the post-game screen, for example `/inhouse submit 5650481942`. Just the number is fine.
