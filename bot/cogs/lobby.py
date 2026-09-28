@@ -379,26 +379,31 @@ class LobbyCog(commands.Cog, name="Lobby"):
             await self.refresh_lobby_message(session, lobby)
             await inter.followup.send("Lobby cancelled.")
 
-    @inhouse.command(name="submit", description="Submit a finished match by Riot match ID (if auto-detect missed it).")
-    @app_commands.describe(match_id="e.g. NA1_1234567890")
+    @inhouse.command(name="submit", description="Submit a finished game by its ID (if auto-detect missed it).")
+    @app_commands.describe(match_id="The game ID from the post-game screen, e.g. 5650481942. The region is added for you.")
     async def inhouse_submit(self, inter: discord.Interaction, match_id: str):
         if await self._wrong_channel(inter):
             return
         await inter.response.defer()
         from bot.services.game_processor import process_match
-        from bot.services.riot_api import RiotAPIError, RiotUnavailable, friendly_error
+        from bot.services.riot_api import RiotAPIError, RiotUnavailable, friendly_error, normalize_match_id
+        try:
+            mid = normalize_match_id(match_id)
+        except ValueError as e:
+            await inter.followup.send(str(e))
+            return
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
             try:
                 in_lobby = lobby is not None and lobby.status == "active"
-                result = await process_match(session, match_id.strip(), submitted_by=inter.user.name,
+                result = await process_match(session, mid, submitted_by=inter.user.name,
                                              lobby_id=lobby.id if in_lobby else None,
                                              ranked=lobby.ranked if in_lobby else True)
             except ValueError as e:
                 await inter.followup.send(str(e))
                 return
             except (RiotAPIError, RiotUnavailable) as e:
-                await inter.followup.send(friendly_error(e))
+                await inter.followup.send(friendly_error(e, context="match", match_id=mid))
                 return
             if lobby and lobby.status == "active" and not result.remake:
                 await lobby_manager.complete_lobby(session, lobby)

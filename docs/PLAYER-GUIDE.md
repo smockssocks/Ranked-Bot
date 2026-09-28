@@ -126,7 +126,8 @@ practice, or teaching a newcomer. Hosts open one with `/inhouse create casual:Tr
    take their slots in pick order, top slot first.
 5. Play. The bot posts results and closes the lobby by itself.
 
-If the bot somehow misses a game, run `/inhouse submit MATCH_ID` in the queue channel.
+If the bot somehow misses a game, run `/inhouse submit` in the queue channel with the game ID
+from the post-game screen, for example `/inhouse submit 5650481942`. Just the number is fine.
 
 ### Things players ask
 

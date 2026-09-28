@@ -154,9 +154,28 @@ async def main() -> int:
                 status = resp.status
                 body = (await resp.text())[:200]
     except Exception as e:
-        print(f"  [!]  Could not reach Riot ({type(e).__name__}).")
-        print("       Check your internet connection, firewall or antivirus.")
-        print(f"       Detail: {e}")
+        from bot.services.riot_api import classify_connection_error
+        kind = classify_connection_error(e)
+        print(f"  [FIX] Could not reach Riot at all ({kind}). Your key was NOT tested.")
+        print(f"        Detail: {e}")
+        print()
+        if kind == "dns":
+            print("  This computer could not look up Riot's server address. Discord may still")
+            print("  work, because each site is looked up separately. Try, in this order:")
+            print()
+            print("    1. Wait a minute and run this check again. It is often temporary.")
+            print("    2. Turn off any VPN.")
+            print("    3. Pause ad-blocking, parental-control or DNS-filtering software.")
+            print("       Some block 'api' addresses.")
+            print("    4. Reset Windows' address cache: press the Windows key, type cmd,")
+            print("       open Command Prompt, type   ipconfig /flushdns   and press Enter.")
+            print("    5. Still failing? Restart your router, or set your PC's DNS to")
+            print("       1.1.1.1 in your network adapter settings.")
+        elif kind == "timeout":
+            print("  Riot did not answer in time. Check your connection and try again.")
+        else:
+            print("  Check your internet connection, and that a firewall or antivirus is")
+            print("  not blocking Python.")
         return 1
 
     print(f"  Riot replied: HTTP {status}")

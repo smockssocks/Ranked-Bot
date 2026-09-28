@@ -5,6 +5,9 @@ Handles: account lookup, match data, timeline, and tournament codes.
 from __future__ import annotations
 import asyncio
 import logging
+import re
+import socket
+
 import aiohttp
 from bot import config as _cfg
 
@@ -31,6 +34,44 @@ def _region_host() -> str:
     return _REGION_HOSTS.get(_cfg.RIOT_REGION, f"{_cfg.RIOT_REGION}.api.riotgames.com")
 
 
+_PLATFORM_PREFIXES = {r.upper() for r in _REGION_HOSTS}
+_MATCH_WITH_PREFIX = re.compile(r"\b([A-Za-z]{2,4}\d?)[_\-\s]?(\d{8,})\b")
+_LONG_DIGITS = re.compile(r"\d{8,}")
+# Region slugs used in stats-site URLs, e.g. leagueofgraphs.com/match/euw/7012345678
+_URL_SLUG = re.compile(r"/([a-z]{2,4})/(\d{8,})", re.I)
+_SLUG_TO_PLATFORM = {
+    "na": "NA1", "euw": "EUW1", "eune": "EUN1", "kr": "KR", "br": "BR1", "lan": "LA1", "las": "LA2",
+    "oce": "OC1", "tr": "TR1", "ru": "RU", "jp": "JP1", "ph": "PH2", "sg": "SG2", "th": "TH2",
+    "tw": "TW2", "vn": "VN2", "me": "ME1",
+}
+
+
+def normalize_match_id(raw: str, region: str | None = None) -> str:
+    """
+    Turn whatever a player pastes into the match-v5 ID Riot expects, e.g. NA1_5650481942.
+
+    The League client's post-game screen shows only the number, so a bare number gets
+    this server's region prefix. Also accepted: na1_123, NA1-123, "NA1 123", and links
+    from sites like leagueofgraphs that contain the number. Raises ValueError with a
+    readable message when there is no plausible game ID in the text.
+    """
+    text = (raw or "").strip()
+    region = (region or _cfg.RIOT_REGION or "na1").upper()
+    m = _MATCH_WITH_PREFIX.search(text)
+    if m and m.group(1).upper() in _PLATFORM_PREFIXES:
+        return f"{m.group(1).upper()}_{m.group(2)}"
+    u = _URL_SLUG.search(text)
+    if u and u.group(1).lower() in _SLUG_TO_PLATFORM:
+        return f"{_SLUG_TO_PLATFORM[u.group(1).lower()]}_{u.group(2)}"
+    digits = _LONG_DIGITS.findall(text)
+    if digits:
+        return f"{region}_{max(digits, key=len)}"
+    raise ValueError(
+        "That doesn't look like a game ID. Use the number from the post-game screen in the "
+        f"League client, for example `5650481942`. The bot adds the region (`{region}_`) itself."
+    )
+
+
 class RiotUnavailable(Exception):
     """Raised when no Riot API key is configured."""
 
@@ -42,11 +83,60 @@ class RiotAPIError(Exception):
         super().__init__(f"Riot API {status}: {message}")
 
 
-def friendly_error(e: Exception) -> str:
-    """Turn a Riot failure into something a server admin can actually act on."""
+class RiotConnectionError(RiotAPIError):
+    """
+    The request never reached Riot: the address lookup (DNS) failed, the connection
+    was refused, TLS failed, or it timed out. A problem with the network of the
+    computer running the bot, never with the API key or the ID that was looked up.
+    Subclasses RiotAPIError so every existing handler already catches it.
+    """
+    def __init__(self, host: str, kind: str, detail: str):
+        self.host = host
+        self.kind = kind          # "dns" | "timeout" | "tls" | "connect"
+        super().__init__(0, f"{kind} error reaching {host}: {detail}")
+
+
+# Network blips are common on home connections; retry these before giving up.
+CONNECT_RETRIES = 3
+CONNECT_BACKOFF_SECS = 1.5
+REQUEST_TIMEOUT_SECS = 30
+
+
+def classify_connection_error(exc: BaseException) -> str:
+    dns_cls = getattr(aiohttp, "ClientConnectorDNSError", None)
+    text = str(exc).lower()
+    if (dns_cls is not None and isinstance(exc, dns_cls)) or isinstance(exc, socket.gaierror) \
+            or "getaddrinfo" in text or "name or service not known" in text or "nodename nor servname" in text:
+        return "dns"
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    ssl_cls = tuple(c for c in (getattr(aiohttp, "ClientSSLError", None),
+                                getattr(aiohttp, "ClientConnectorCertificateError", None)) if c)
+    if ssl_cls and isinstance(exc, ssl_cls):
+        return "tls"
+    return "connect"
+
+
+def friendly_error(e: Exception, context: str = "account", match_id: str | None = None) -> str:
+    """
+    Turn a Riot failure into something a server admin can actually act on.
+    context: "account" when looking up a Riot ID, "match" when fetching a game.
+    """
     if isinstance(e, RiotUnavailable):
         return ("The bot has no Riot API key configured. An admin needs to put one in the "
                 "`.env` file and restart the bot.")
+    if isinstance(e, RiotConnectionError):
+        if e.kind == "dns":
+            return (f"**The bot couldn't find Riot's server** (`{e.host}`).\n"
+                    "This is a network problem on the computer running the bot. Your API key and "
+                    "the ID you entered were never checked. It is usually temporary, so try again in a minute.\n"
+                    "Admin, if it keeps happening: turn off any VPN, pause ad-blocking or DNS-filtering "
+                    "software, and run CHECK-RIOT-KEY.bat to test the connection.")
+        if e.kind == "timeout":
+            return "Riot took too long to answer. Try again in a minute."
+        return ("**The bot couldn't connect to Riot's servers.**\n"
+                "Admin: check the bot computer's internet connection, and that a firewall or "
+                "antivirus is not blocking Python.")
     if not isinstance(e, RiotAPIError):
         return f"Unexpected error talking to Riot: {e}"
     body = (getattr(e, "body", "") or "").lower()
@@ -61,6 +151,17 @@ def friendly_error(e: Exception) -> str:
                 "Admin: development keys last only 24 hours. Get a fresh key at "
                 "https://developer.riotgames.com, paste it into `.env`, and restart the bot. "
                 "Apply for a Personal API Key there to stop this happening daily.")
+    if e.status == 404 and context == "match":
+        shown = f"`{match_id}`" if match_id else "that game"
+        return (f"Riot has no record of {shown}.\n"
+                "- Games can take a few minutes to appear after they end. Try again shortly.\n"
+                f"- Check the number, and that the region is right. This bot is set to "
+                f"`{_cfg.RIOT_REGION.upper()}`; a game played on another server has a different prefix.\n"
+                "- Only games that actually finished are recorded. A lobby that dodged or "
+                "was abandoned in champ select has no match.")
+    if e.status == 400 and context == "match":
+        return (f"Riot rejected {f'`{match_id}`' if match_id else 'that ID'} as malformed. Use the number "
+                "from the post-game screen, for example `5650481942`.")
     if e.status == 404:
         return ("That Riot ID does not exist. Check the spelling and remember it is "
                 "`GameName#TAG`, exactly as shown in the League client. The tag is the part "
@@ -79,47 +180,52 @@ class RiotClient:
 
     async def __aenter__(self):
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECS))
         return self
 
     async def __aexit__(self, *_):
         if self._owns_session and self._session:
             await self._session.close()
 
-    async def _get(self, host: str, path: str, api_key: str | None = None, retries: int = 3) -> dict:
+    async def _request(self, method: str, host: str, path: str, api_key: str | None = None,
+                       payload: dict | None = None) -> dict | list:
         url = f"https://{host}{path}"
         key = api_key or _cfg.RIOT_API_KEY
         if not key:
             raise RiotUnavailable("RIOT_API_KEY is not configured.")
         headers = {"X-Riot-Token": key}
-        delay = 1.0
-        for attempt in range(retries):
-            async with self._session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                if resp.status == 429:
-                    retry_after = float(resp.headers.get("Retry-After", delay))
-                    log.warning("Rate limited on %s, waiting %.1fs", path, retry_after)
-                    await asyncio.sleep(retry_after)
-                    delay *= 2
-                    continue
-                if resp.status == 404:
-                    raise RiotAPIError(404, f"Not found: {path}")
-                text = await resp.text()
-                raise RiotAPIError(resp.status, text)
-        raise RiotAPIError(429, f"Exhausted retries for {path}")
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        rate_delay, rate_tries, conn_tries = 1.0, 0, 0
+        while True:
+            try:
+                async with self._session.request(method, url, headers=headers, json=payload) as resp:
+                    if resp.status in (200, 201):
+                        return await resp.json()
+                    if resp.status == 429 and rate_tries < 3:
+                        rate_tries += 1
+                        wait = float(resp.headers.get("Retry-After", rate_delay))
+                        log.warning("Rate limited on %s, waiting %.1fs", path, wait)
+                        await asyncio.sleep(wait)
+                        rate_delay *= 2
+                        continue
+                    if resp.status == 404:
+                        raise RiotAPIError(404, f"Not found: {path}")
+                    raise RiotAPIError(resp.status, await resp.text())
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError, socket.gaierror) as e:
+                conn_tries += 1
+                kind = classify_connection_error(e)
+                if conn_tries >= CONNECT_RETRIES:
+                    log.error("Giving up on %s after %d tries (%s): %s", host, conn_tries, kind, e)
+                    raise RiotConnectionError(host, kind, str(e)) from e
+                log.warning("Could not reach %s (%s), retry %d/%d", host, kind, conn_tries, CONNECT_RETRIES - 1)
+                await asyncio.sleep(CONNECT_BACKOFF_SECS * conn_tries)
+
+    async def _get(self, host: str, path: str, api_key: str | None = None) -> dict:
+        return await self._request("GET", host, path, api_key=api_key)
 
     async def _post(self, host: str, path: str, payload: dict, api_key: str | None = None) -> dict | list:
-        url = f"https://{host}{path}"
-        key = api_key or _cfg.RIOT_API_KEY
-        if not key:
-            raise RiotUnavailable("RIOT_API_KEY is not configured.")
-        headers = {"X-Riot-Token": key, "Content-Type": "application/json"}
-        async with self._session.post(url, json=payload, headers=headers) as resp:
-            if resp.status in (200, 201):
-                return await resp.json()
-            text = await resp.text()
-            raise RiotAPIError(resp.status, text)
+        return await self._request("POST", host, path, api_key=api_key, payload=payload)
 
     # ------------------------------------------------------------------ #
     # Account                                                              #

@@ -4,6 +4,7 @@ import sys
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot import config
@@ -25,6 +26,7 @@ class RankedBot(commands.Bot):
         super().__init__(command_prefix=config.COMMAND_PREFIX, intents=intents)
 
     async def setup_hook(self):
+        self.tree.error(self._on_app_command_error)
         await init_db()
         for cog in COGS:
             await self.load_extension(cog)
@@ -42,6 +44,32 @@ class RankedBot(commands.Bot):
         if drafter_api.is_configured():
             self.draft_poll_loop.change_interval(seconds=config.DRAFTER_POLL_SECS)
             self.draft_poll_loop.start()
+
+    async def _on_app_command_error(self, interaction: discord.Interaction,
+                                    error: app_commands.AppCommandError) -> None:
+        """
+        Last line of defence. Any exception a command did not handle itself would
+        otherwise leave the player staring at "thinking..." forever. Log it, and tell
+        them something useful.
+        """
+        from bot.services.riot_api import RiotAPIError, RiotUnavailable, friendly_error
+        original = getattr(error, "original", error)
+        if isinstance(error, (app_commands.MissingPermissions, app_commands.CheckFailure)):
+            msg = "You don't have permission to use that command."
+        elif isinstance(original, (RiotAPIError, RiotUnavailable)):
+            msg = friendly_error(original)
+        else:
+            name = interaction.command.qualified_name if interaction.command else "?"
+            log.error("Unhandled error in /%s", name, exc_info=original)
+            msg = ("Something went wrong running that command. It has been logged in the bot's "
+                   "window for the admin. Please try again in a moment.")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
     async def on_ready(self):
         log.info("Logged in as %s (id=%s)", self.user, self.user.id)

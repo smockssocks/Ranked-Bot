@@ -97,7 +97,7 @@ prefers containers on a Linux host.
    run `/help` at any time, which tells them what to do next and where your queue channel is.
 
 To test scoring without playing a fresh game, take any past 10-player custom from your match
-history and run `/admin submit NA1_1234567890`.
+history and run `/admin submit 5650481942` with the number from its post-game screen.
 
 Run the test suite any time with `pytest`. It needs no network, Discord or keys.
 
@@ -126,7 +126,8 @@ Run the test suite any time with `pytest`. It needs no network, Discord or keys.
 6. Within about two minutes of the game ending (`AUTO_DETECT_POLL_SECS`) the bot finds it in
    the players' match history, processes it, posts a results embed (LP changes, performance
    score, MVP) in the lobby channel, and closes the lobby. If it somehow misses it,
-   `/inhouse submit MATCH_ID` does the same thing manually.
+   `/inhouse submit 5650481942` does the same thing manually. Use the game ID from the
+   post-game screen; the bot adds the region prefix itself.
 7. Players check `/rank`, `/history`, and `/explain` to see exactly why they gained or lost LP.
 
 Note: Riot only saves custom games to match history when they are real 5v5 games; a two-player
@@ -212,9 +213,9 @@ knows about you. `CHAT_PERSONA` in `.env` changes its personality.
 | Command | What |
 | --- | --- |
 | `/admin link`, `/admin unlink` | Manage Riot links for others. |
-| `/admin submit MATCH_ID` | Process any custom game. |
-| `/admin rollback MATCH_ID` | Undo a game exactly (restores every rating and the learned baselines). |
-| `/admin reprocess MATCH_ID` | Rollback + process again (after tuning the model). Most recent games only. |
+| `/admin submit GAME_ID` | Process any custom game. The number from the post-game screen is enough. |
+| `/admin rollback GAME_ID` | Undo a game exactly (restores every rating and the learned baselines). |
+| `/admin reprocess GAME_ID` | Rollback + process again (after tuning the model). Most recent games only. |
 | `/admin reset @player` | Back to 1000 LP and placements. |
 | `/admin modes` | Choose which lobby modes hosts can open, the default mode, and whether casual lobbies are allowed. No options shows the current setup. |
 | `/admin queuechannel` | Lock every queue command and lobby button to one channel. Run it with no options to see the current setting, or `clear:True` to allow any channel. |
@@ -340,7 +341,8 @@ is off, edit `ROLE_WEIGHTS` in `rating_engine.py`, compare with `/admin baseline
 | Bot exits at start with an intents error | Enable Server Members and Message Content intents in the developer portal. |
 | `/link` says "Riot API 403" | Development key expired (24h) or wrong `RIOT_REGION` / `RIOT_PLATFORM`. |
 | `/link` says "Riot API 404" | Riot ID typo. Format is `GameName#TAG`, the tag is the part after # in the client. |
-| Game never detected | All ten must be `/link`ed and the game must be a real 5v5 custom; check `docker compose logs bot` for "match id lookup failed". Use `/inhouse submit MATCH_ID` meanwhile. |
+| Game never detected | All ten must be `/link`ed and the game must be a real 5v5 custom; check `docker compose logs bot` for "match id lookup failed". Use `/inhouse submit GAME_ID` meanwhile. |
+| "The bot couldn't find Riot's server" or `getaddrinfo failed` in the log | The bot's computer could not look up Riot's address, so nothing reached Riot. The bot already retries short blips. If it persists: turn off VPNs, pause DNS-filtering or ad-blocking software, run `ipconfig /flushdns`, and run `CHECK-RIOT-KEY.bat`, which tests the connection. |
 | Players get "not linked" when queueing | They need `/link` first. |
 | Flags never appear | Run `/admin modchannel`. |
 | Chat does nothing | `OPENROUTER_API_KEY` missing, Message Content intent off, or the daily budget is spent (`/chat status`). |

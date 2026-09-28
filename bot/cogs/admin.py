@@ -13,7 +13,7 @@ from bot.models.player import Player
 from bot.models.rating import PlayerRating, RoleBaseline
 from bot.services import settings, smurf_detector
 from bot.services.game_processor import get_or_create_rating, process_match, reprocess_match, rollback_match
-from bot.services.riot_api import RiotAPIError, RiotClient, RiotUnavailable, friendly_error
+from bot.services.riot_api import RiotAPIError, RiotClient, RiotUnavailable, friendly_error, normalize_match_id
 from bot.ui import embeds
 
 
@@ -100,40 +100,57 @@ class AdminCog(commands.Cog, name="Admin"):
             await session.commit()
         await inter.followup.send(f"Unlinked **{member.display_name}**.")
 
-    @admin.command(name="submit", description="Process a match by Riot match ID.")
+    @admin.command(name="submit", description="Process a match by its game ID.")
+    @app_commands.describe(match_id="The game ID from the post-game screen, e.g. 5650481942. The region is added for you.")
     async def admin_submit(self, inter: discord.Interaction, match_id: str):
         await inter.response.defer()
+        try:
+            mid = normalize_match_id(match_id)
+        except ValueError as e:
+            await inter.followup.send(str(e)); return
         async with SessionLocal() as session:
             try:
-                result = await process_match(session, match_id.strip(), submitted_by=inter.user.name)
+                result = await process_match(session, mid, submitted_by=inter.user.name)
             except ValueError as e:
                 await inter.followup.send(str(e)); return
             except (RiotAPIError, RiotUnavailable) as e:
-                await inter.followup.send(friendly_error(e)); return
+                await inter.followup.send(friendly_error(e, context="match", match_id=mid)); return
         await inter.followup.send(embed=embeds.results_embed(result))
         mod = self.bot.get_cog("Moderation")
         if mod and result.smurf_flags:
             await mod.post_flags(str(inter.guild_id), result.smurf_flags)
 
     @admin.command(name="reprocess", description="Roll back a match and process it again (most recent games only).")
+    @app_commands.describe(match_id="The game ID from the post-game screen, e.g. 5650481942. The region is added for you.")
     async def admin_reprocess(self, inter: discord.Interaction, match_id: str):
         await inter.response.defer()
+        try:
+            mid = normalize_match_id(match_id)
+        except ValueError as e:
+            await inter.followup.send(str(e)); return
         async with SessionLocal() as session:
             try:
-                result = await reprocess_match(session, match_id.strip(), submitted_by=inter.user.name)
+                result = await reprocess_match(session, mid, submitted_by=inter.user.name)
             except ValueError as e:
                 await inter.followup.send(str(e)); return
+            except (RiotAPIError, RiotUnavailable) as e:
+                await inter.followup.send(friendly_error(e, context="match", match_id=mid)); return
         await inter.followup.send(embed=embeds.results_embed(result))
 
     @admin.command(name="rollback", description="Undo a match's LP changes (most recent games only).")
+    @app_commands.describe(match_id="The game ID from the post-game screen, e.g. 5650481942. The region is added for you.")
     async def admin_rollback(self, inter: discord.Interaction, match_id: str):
         await inter.response.defer()
+        try:
+            mid = normalize_match_id(match_id)
+        except ValueError as e:
+            await inter.followup.send(str(e)); return
         async with SessionLocal() as session:
             try:
-                await rollback_match(session, match_id.strip())
+                await rollback_match(session, mid)
             except ValueError as e:
                 await inter.followup.send(str(e)); return
-        await inter.followup.send(f"Rolled back **{match_id}**. Ratings restored to their pre-game values.")
+        await inter.followup.send(f"Rolled back **{mid}**. Ratings restored to their pre-game values.")
 
     @admin.command(name="reset", description="Reset a player's ratings this season.")
     async def admin_reset(self, inter: discord.Interaction, member: discord.Member):

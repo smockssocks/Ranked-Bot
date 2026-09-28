@@ -143,7 +143,8 @@ it is running. Leave the window open.** Closing it turns the bot off.
 4. Run `/howranked` and pin the result so people understand the LP system.
 
 To test that scoring works without playing a fresh game, find any past 10-player custom
-game in your match history and run `/admin submit NA1_1234567890` with its match ID.
+game and run `/admin submit` with the number from its post-game screen, for example
+`/admin submit 5650481942`. The bot adds the `NA1_` region part itself.
 
 ---
 
@@ -185,12 +186,26 @@ tells you exactly which of these it is. In order of how often it happens:
 
 Anything you change in `.env` needs a bot restart to take effect. Every time.
 
+**"The bot couldn't find Riot's server", or `getaddrinfo failed` in the black window.**
+Your computer couldn't look up Riot's address, so the request never reached Riot. Your key
+and the game ID were never checked, so changing them won't help. The bot already retries
+short blips by itself. If it keeps happening:
+
+1. Double-click `CHECK-RIOT-KEY.bat`. It tests the connection and tells you what it sees.
+2. Turn off any VPN.
+3. Pause ad-blocking, parental-control or DNS-filtering software. Some block "api" addresses.
+4. Press the Windows key, type `cmd`, open Command Prompt, type `ipconfig /flushdns`, press Enter.
+5. Still failing? Restart your router.
+
+Discord can keep working while this fails, because each website is looked up separately.
+
 **Riot API 404 when someone runs `/link`.**
 Typo in the Riot ID. It must be `GameName#TAG`, exactly as it appears in the League client.
 
 **The game finished but the bot never posted results.**
 All ten players must have run `/link`, and it must be a real 5v5 custom game. Give it two
-minutes. If it still misses, run `/inhouse submit MATCH_ID` in the lobby channel.
+minutes. If it still misses, run `/inhouse submit` with the game ID from the post-game
+screen, for example `/inhouse submit 5650481942`.
 
 **Slash commands are missing or stale.**
 Stop the bot with Ctrl+C in the black window, then run `START-BOT.bat` again. Commands
