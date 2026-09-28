@@ -322,21 +322,27 @@ class RiotClient:
     async def create_tournament_code(
         self,
         tournament_id: int,
+        allowed_participants: list[str] | None = None,
         team_size: int = 5,
-        allowed_summoner_ids: list[str] | None = None,
         metadata: str = "",
     ) -> str:
-        """Step 3. Returns the tournament code string."""
+        """
+        Step 3 (tournament-v5). Returns a code players paste into the League client.
+        allowedParticipants are PUUIDs (v4 used summoner IDs), and v5 requires enoughPlayers:
+        true only when the allowed list can fill both teams.
+        """
         platform_host = _platform_host()
+        participants = list(allowed_participants or [])
         payload = {
             "mapType": "SUMMONERS_RIFT",
             "pickType": "TOURNAMENT_DRAFT",
             "spectatorType": "ALL",
             "teamSize": team_size,
-            "metadata": metadata,
+            "metadata": metadata[:1000],
+            "enoughPlayers": len(participants) >= team_size * 2,
         }
-        if allowed_summoner_ids:
-            payload["allowedSummonerIds"] = allowed_summoner_ids
+        if participants:
+            payload["allowedParticipants"] = participants
         codes = await self._post(
             platform_host,
             f"/lol/tournament/v5/codes?tournamentId={tournament_id}&count=1",

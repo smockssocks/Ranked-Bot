@@ -63,12 +63,6 @@ def teams_embed(lobby: Lobby, names: dict[int, str], ratings: dict[int, dict] | 
         from bot.services.rating_engine import expected_win
         p = expected_win([m1], [m2])
         e.add_field(name="Predicted", value=f"Blue {p*100:.0f}% — Red {(1-p)*100:.0f}%", inline=False)
-    if lobby.drafter_links:
-        links = lobby.drafter_links
-        parts = [f"[{k.capitalize()}]({v})" for k, v in links.items()]
-        e.add_field(name="Draft (drafter.lol)", value=" • ".join(parts), inline=False)
-    if lobby.tournament_code:
-        e.add_field(name="Tournament code", value=f"`{lobby.tournament_code}`", inline=False)
     if lobby.mode == "pick_order":
         e.set_footer(text="Pick 1 calls their role first in champ select. Results are picked up automatically.")
     else:
@@ -168,4 +162,31 @@ def flag_embed(flag, player_name: str, matched_name: str | None) -> discord.Embe
         lines = [f"{k}: {v}" for k, v in ev.items() if k != "same_game"][:10]
         e.add_field(name="Evidence", value="\n".join(lines) or "—", inline=False)
     e.set_footer(text="Resolve with /flags resolve <id> confirmed|dismissed")
+    return e
+
+
+def join_embed(lobby: Lobby, creator_name: str | None) -> discord.Embed:
+    """How to get into the custom game. Only ever posted in the lobby's private channel."""
+    e = discord.Embed(title="Getting into the game", color=discord.Color.gold())
+    slots = ("Take the slots in **pick order**, Pick 1 at the top of your team, so champ select runs in the right order."
+             if lobby.mode == "pick_order" else
+             "Join the team you're on: **Blue is Team 1**, **Red is Team 2**.")
+    if lobby.tournament_code:
+        e.description = (
+            "Everyone, in the League client: click **Play**, then the **trophy icon** at the top of the "
+            "game-mode screen, and paste this code. It sets everything up and only works for the players "
+            "in this lobby.\n"
+            f"```{lobby.tournament_code}```\n{slots}")
+    else:
+        who = f"**{creator_name}**" if creator_name else "The host"
+        e.description = (
+            f"{who} creates the lobby:\n"
+            f"**1.** Play, then **Create Custom**, **Summoner's Rift**, game type **Tournament Draft**.\n"
+            f"**2.** Lobby name `{lobby.join_name}` and password `{lobby.join_password}`, then **Confirm**.\n\n"
+            f"**Everyone else:** Play, then **Create Custom**, the **Join Custom** tab, search "
+            f"`{lobby.join_name}`, and enter the password.\n\n{slots}")
+    if lobby.drafter_links:
+        parts = [f"[{k.capitalize()}]({v})" for k, v in lobby.drafter_links.items()]
+        e.add_field(name="Draft (drafter.lol)", value=" • ".join(parts), inline=False)
+    e.set_footer(text="Keep this in this channel. Results are picked up automatically after the game.")
     return e

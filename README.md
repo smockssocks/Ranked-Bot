@@ -342,6 +342,28 @@ is off, edit `ROLE_WEIGHTS` in `rating_engine.py`, compare with `/admin baseline
 
 ---
 
+## Private game channels
+
+When a lobby starts, the bot opens `#game-N` for that game. Only its players, the host, the
+@Inhouse Mod role and staff roles (anything with Manage Server; Administrators see all channels)
+can see it. The bot pings the players there and posts:
+
+- the teams and pick positions (in a captain draft, the draft itself happens there);
+- **how to get into the game**, never shown publicly:
+  - with a Riot **tournament key** (`RIOT_TOURNAMENT_API_KEY`, Production keys only), a real
+    tournament code locked to exactly those players (tournament-v5, `allowedParticipants`);
+  - otherwise a generated custom lobby name and password, and which player creates the lobby
+    (the host if they're playing, else blue side's first pick);
+- the drafter.lol links, and draft picks and bans when the draft finishes;
+- the result when the game is recorded, or a notice if the lobby is cancelled.
+
+The public queue channel gets the teams with nothing secret in them and a link to the private
+channel. Lobby commands (`/inhouse pick`, `/inhouse submit`, …) work inside a game's channel and
+act on that game. The channel is deleted `GAME_CHANNEL_CLEANUP_MINUTES` (default 15) after the
+game ends; set it to 0 to keep them, or `GAME_CHANNELS_ENABLED=false` to turn the feature off. If
+the bot can't create channels (it needs Manage Channels and Manage Roles), players are sent the
+details by DM instead.
+
 ## Queue bans
 
 Moderators (Manage Messages) can stop someone playing inhouses for a while without touching

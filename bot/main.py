@@ -44,6 +44,8 @@ class RankedBot(commands.Bot):
         if drafter_api.is_configured():
             self.draft_poll_loop.change_interval(seconds=config.DRAFTER_POLL_SECS)
             self.draft_poll_loop.start()
+        if config.GAME_CHANNELS_ENABLED and config.GAME_CHANNEL_CLEANUP_MINUTES > 0:
+            self.game_channel_cleanup.start()
 
     async def _on_app_command_error(self, interaction: discord.Interaction,
                                     error: app_commands.AppCommandError) -> None:
@@ -112,6 +114,8 @@ class RankedBot(commands.Bot):
                 fresh = await session.get(type(lobby), lobby.id)
                 if fresh:
                     await lobby_cog.refresh_lobby_message(session, fresh)
+                    from bot.cogs.lobby import cleanup_note
+                    await lobby_cog.post_to_game(fresh, f"**Game recorded.** {cleanup_note()}", [embed])
         mod = self.get_cog("Moderation")
         if mod and result.smurf_flags:
             await mod.post_flags(lobby.guild_id, result.smurf_flags)
@@ -144,7 +148,8 @@ class RankedBot(commands.Bot):
                         lobby.drafter_result = {"blue_picks": d.blue_picks, "red_picks": d.red_picks,
                                                 "blue_bans": d.blue_bans, "red_bans": d.red_bans}
                         await session.commit()
-                        ch = self.get_channel(int(lobby.channel_id))
+                        ch = (self.get_channel(int(lobby.game_channel_id)) if lobby.game_channel_id else None) \
+                            or self.get_channel(int(lobby.channel_id))
                         if ch:
                             e = discord.Embed(title=f"Draft complete — lobby #{lobby.id}", color=discord.Color.purple())
                             e.add_field(name="Blue picks", value=", ".join(d.blue_picks) or "—", inline=True)
@@ -154,6 +159,33 @@ class RankedBot(commands.Bot):
                             await ch.send(embed=e)
         except Exception:
             log.exception("draft poll failed")
+
+    # ------------------------------------------------------------------ #
+    # background: delete private game channels once the game is over      #
+    # ------------------------------------------------------------------ #
+    @tasks.loop(minutes=1)
+    async def game_channel_cleanup(self):
+        from bot.services import game_channel
+        try:
+            async with SessionLocal() as session:
+                for lobby in await game_channel.due_for_cleanup(session):
+                    ch = self.get_channel(int(lobby.game_channel_id))
+                    if ch is not None:
+                        try:
+                            await ch.delete(reason=f"Lobby #{lobby.id} is over")
+                        except discord.NotFound:
+                            pass
+                        except discord.HTTPException as e:
+                            log.warning("could not delete game channel %s: %s", lobby.game_channel_id, e)
+                            continue
+                    lobby.game_channel_id = None
+                await session.commit()
+        except Exception:
+            log.exception("game channel cleanup failed")
+
+    @game_channel_cleanup.before_loop
+    async def _before_cleanup(self):
+        await self.wait_until_ready()
 
     @draft_poll_loop.before_loop
     async def _before_draft(self):

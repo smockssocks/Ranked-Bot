@@ -115,6 +115,9 @@ LOBBY_SIZE = _int("LOBBY_SIZE", 10)
 ALLOWED_MODES = [m.strip() for m in os.getenv("ALLOWED_MODES", "pick_order,balanced,captain").split(",") if m.strip()]
 DEFAULT_MODE = os.getenv("DEFAULT_MODE", "pick_order")
 CASUAL_ALLOWED = _bool("CASUAL_ALLOWED", True)
+# A private #game-N channel for each started inhouse, for its players and staff.
+GAME_CHANNELS_ENABLED = _bool("GAME_CHANNELS_ENABLED", True)
+GAME_CHANNEL_CLEANUP_MINUTES = _int("GAME_CHANNEL_CLEANUP_MINUTES", 15)   # 0 = keep them
 LOBBY_TIMEOUT_SECS = _int("LOBBY_TIMEOUT_SECS", 3600)
 AUTO_DETECT_ENABLED = _bool("AUTO_DETECT_ENABLED", True)
 AUTO_DETECT_POLL_SECS = _int("AUTO_DETECT_POLL_SECS", 120)

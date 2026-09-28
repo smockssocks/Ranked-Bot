@@ -18,7 +18,7 @@ When a lobby is open, press the green **Join** button.
 Changed your mind? Press **Leave** or run `/dequeue`.
 
 **3. Get your pick**
-At 10 players the host starts it. The bot makes fair teams and gives you a **pick position, 1 to 5**.
+At 10 players the host starts it. The bot makes fair teams, gives you a **pick position, 1 to 5**, and opens a **private channel for your game** with the lobby name and password.
 **There is no role queue.** In champ select, Pick 1 calls their role first, then Pick 2, and so on. Line up in the custom lobby in pick order.
 Picks rotate: a late pick now means an early pick soon.
 

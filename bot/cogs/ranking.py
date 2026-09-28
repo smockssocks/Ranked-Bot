@@ -204,8 +204,9 @@ class RankingCog(commands.Cog, name="Ranking"):
             inline=False)
         e.add_field(
             name="3. Get your pick",
-            value=("At 10 players the host starts it. The bot makes fair teams and gives you a "
-                   "**pick position, 1 to 5**. There is no role queue: in champ select, Pick 1 calls "
+            value=("At 10 players the host starts it. The bot makes fair teams, gives you a "
+                   "**pick position, 1 to 5**, and opens a **private channel for your game** with the lobby "
+                   "name and password and the draft. There is no role queue: in champ select, Pick 1 calls "
                    "their role first, then Pick 2, and so on. Line up in the custom lobby in pick order.\n"
                    "Picks rotate. If you had a late pick last time, you'll get an early one soon."),
             inline=False)

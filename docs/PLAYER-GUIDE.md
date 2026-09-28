@@ -122,7 +122,9 @@ practice, or teaching a newcomer. Hosts open one with `/inhouse create casual:Tr
 1. In the queue channel, run `/inhouse create`. It uses your default mode.
    Add `casual:True` if tonight shouldn't count.
 2. Wait for 10. The bot pings you when the lobby fills.
-3. Press **Start**. The bot posts teams and each player's pick position.
+3. Press **Start**. The bot opens a private `#game-N` channel for the ten players and staff,
+   with the teams, pick positions, the lobby name and password (or a tournament code), and
+   who creates the custom lobby. It's deleted a little while after the game.
 4. Create the custom lobby in the League client, **Tournament Draft**, and have players
    take their slots in pick order, top slot first.
 5. Play. The bot posts results and closes the lobby by itself.
