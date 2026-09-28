@@ -120,14 +120,13 @@ async def test_captain_draft_flow_and_role_swap(db):
             await lm.queue_player(session, lobby, p.discord_id)
         cap1, cap2 = await lm.start_captain_draft(session, lobby, random_captains=True)
         assert lobby.status == "drafting"
-        with pytest.raises(LobbyError):
-            await lm.captain_pick(session, lobby, cap2.discord_id, players[0].discord_id)  # not cap2's turn
         pool = list(lobby.draft_state["pool"])
+        with pytest.raises(LobbyError):
+            await lm.captain_pick(session, lobby, cap2.discord_id, pool[0])      # not cap2's turn
         order = lobby.draft_state["pick_order"]
         for turn, pid in zip(order, pool):
             cap = cap1 if turn == 1 else cap2
-            target = next(p for p in players if p.id == pid)
-            await lm.captain_pick(session, lobby, cap.discord_id, target.discord_id)
+            await lm.captain_pick(session, lobby, cap.discord_id, pid)
         assert lobby.status == "active"
         t1 = [lp for lp in lobby.players if lp.team == 1]
         t2 = [lp for lp in lobby.players if lp.team == 2]
@@ -245,3 +244,112 @@ async def test_force_queue_needs_a_linked_account_and_room(db):
         await lm.make_teams(session, lobby)
         with pytest.raises(LobbyError, match="Teams are already made"):
             await lm.force_remove(session, lobby, "host", players[0].discord_id)
+
+
+# --- test fillers, force captains, and who may pick ------------------------
+
+async def test_fillers_fill_balance_and_clear(db):
+    import random
+    from bot.models.rating import PlayerRating
+    from sqlalchemy import select
+    async with db() as session:
+        me = Player(discord_id="1", discord_username="me", riot_puuid="real-1")
+        session.add(me)
+        await session.commit()
+        lobby = await lm.create_lobby(session, "g", "c", "1", mode="balanced")
+        await lm.queue_player(session, lobby, "1")
+        added = await lm.test_fill(session, lobby, count=4, rng=random.Random(2))
+        assert len(added) == 4 and len(lobby.players) == 5 and all(f.is_test for f in added)
+        added += await lm.test_fill(session, lobby, rng=random.Random(3))       # fills the rest
+        assert len(lobby.players) == 10
+        with pytest.raises(LobbyError, match="full"):
+            await lm.test_fill(session, lobby)
+        assert list(await lm.lobby_puuids(session, lobby)) == ["real-1"]        # fillers never go to Riot
+        mmrs = {round(v["mmr"]) for pid, v in (await lm.lobby_ratings(session, lobby)).items() if pid != me.id}
+        assert len(mmrs) > 5                                                     # a real spread to balance
+        await lm.make_teams(session, lobby)
+        removed, cancelled = await lm.test_clear(session)
+        assert removed == 9 and cancelled == 1
+        left = (await session.execute(select(Player))).scalars().all()
+        assert [p.discord_id for p in left] == ["1"]
+        assert (await session.execute(select(PlayerRating).where(PlayerRating.player_id != me.id))).first() is None
+        assert await lm.test_clear(session) == (0, 0)
+
+
+async def test_idle_fillers_are_reused(db):
+    import random
+    async with db() as session:
+        a = await lm.create_lobby(session, "g", "c1", "h")
+        first = await lm.test_fill(session, a, count=3, rng=random.Random(1))
+        a.status = "cancelled"
+        await session.commit()
+        b = await lm.create_lobby(session, "g", "c2", "h")
+        again = await lm.test_fill(session, b, count=3, rng=random.Random(1))
+        assert {f.id for f in again} == {f.id for f in first}                    # no endless new fillers
+
+
+async def _captain_lobby(session, host="host"):
+    players = await _players(session)
+    lobby = await lm.create_lobby(session, "g", "c", host, mode="captain")
+    for p in players:
+        await lm.queue_player(session, lobby, p.discord_id)
+    return players, lobby
+
+
+async def test_force_captains_starts_and_restarts_the_draft(db):
+    async with db() as session:
+        players, lobby = await _captain_lobby(session)
+        blue, red = players[3], players[7]
+        with pytest.raises(LobbyError, match="host or an admin"):
+            await lm.force_captains(session, lobby, players[0].discord_id, False, blue.id, red.id)
+        with pytest.raises(LobbyError, match="two different"):
+            await lm.force_captains(session, lobby, "host", False, blue.id, blue.id)
+        c1, c2 = await lm.force_captains(session, lobby, "host", False, blue.id, red.id)
+        assert (c1.id, c2.id) == (blue.id, red.id) and lobby.status == "drafting"
+        await lm.captain_pick(session, lobby, blue.discord_id, lobby.draft_state["pool"][0])
+        # changing captains mid-draft restarts it cleanly
+        c1, c2 = await lm.force_captains(session, lobby, "host", False, players[0].id, players[1].id)
+        assert lobby.draft_state["picks_made"] == 0 and len(lobby.draft_state["pool"]) == 8
+        assert sum(1 for lp in lobby.players if lp.team is not None) == 2
+
+
+async def test_force_captains_only_in_captain_mode(db):
+    async with db() as session:
+        players = await _players(session)
+        lobby = await lm.create_lobby(session, "g", "c", "host", mode="pick_order")
+        for p in players:
+            await lm.queue_player(session, lobby, p.discord_id)
+        with pytest.raises(LobbyError, match="Captain draft"):
+            await lm.force_captains(session, lobby, "host", False, players[0].id, players[1].id)
+
+
+async def test_host_can_pick_for_an_afk_captain_but_not_as_the_rival_captain(db):
+    async with db() as session:
+        players, lobby = await _captain_lobby(session, host=None or "x")
+        blue, red = players[0], players[1]
+        await lm.force_captains(session, lobby, "x", False, blue.id, red.id)
+        # neutral host picks for the blue captain (AFK): allowed
+        await lm.captain_pick(session, lobby, "x", lobby.draft_state["pool"][0])
+        # now it is red's turn; blue is an admin but must NOT pick for the rival captain
+        with pytest.raises(LobbyError, match="not your turn"):
+            await lm.captain_pick(session, lobby, blue.discord_id, lobby.draft_state["pool"][0], is_admin=True)
+        # a random player can't pick for anyone
+        with pytest.raises(LobbyError, match="not your turn"):
+            await lm.captain_pick(session, lobby, players[5].discord_id, lobby.draft_state["pool"][0])
+
+
+async def test_solo_testing_host_captain_can_pick_for_a_filler_captain(db):
+    import random
+    async with db() as session:
+        me = Player(discord_id="1", discord_username="me", riot_puuid="real-1")
+        session.add(me)
+        await session.commit()
+        lobby = await lm.create_lobby(session, "g", "c", "1", mode="captain")
+        await lm.queue_player(session, lobby, "1")
+        await lm.test_fill(session, lobby, rng=random.Random(4))
+        filler = next(lp.player_id for lp in lobby.players if lp.player_id != me.id)
+        await lm.force_captains(session, lobby, "1", False, me.id, filler)
+        while lobby.status == "drafting":                                          # I pick for both sides
+            await lm.captain_pick(session, lobby, "1", lobby.draft_state["pool"][0])
+        assert lobby.status == "active"
+        assert sorted(sum(1 for lp in lobby.players if lp.team == t) for t in (1, 2)) == [5, 5]

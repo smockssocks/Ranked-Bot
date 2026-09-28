@@ -41,7 +41,8 @@ class RankingCog(commands.Cog, name="Ranking"):
                 select(GameParticipant).join(Game, Game.id == GameParticipant.game_id)
                 .where(GameParticipant.player_id == p.id, Game.status == "processed")
                 .order_by(desc(Game.played_at)).limit(10))).scalars().all()
-        await inter.followup.send(embed=embeds.rank_embed(p.discord_username, overall, roles, p.summoner_name, recent))
+        await inter.followup.send(embed=embeds.rank_embed(p.discord_username, overall, roles, p.summoner_name, recent,
+                                                       verified=bool(p.link_verified)))
 
     @app_commands.command(name="leaderboard", description="Top players this season, by LP or by versatility.")
     @app_commands.describe(role="Show the ladder for one role",
@@ -181,8 +182,8 @@ class RankingCog(commands.Cog, name="Ranking"):
         step1 = ("~~**1. Link your Riot account**~~ ✅ done" if linked else
                  "**1. Link your Riot account**\n"
                  "Run `/link` with your full Riot ID, for example `/link Danman#NA1`.\n"
-                 "That is the name and tag shown in the League client. You only do this once, "
-                 "and you cannot join a queue until you have.")
+                 "The bot will ask you to switch your League profile icon once, to prove the account is "
+                 "yours. You only do this once, and you cannot join a queue until you have.")
 
         e = discord.Embed(
             title="How to play inhouses",

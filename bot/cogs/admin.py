@@ -11,7 +11,7 @@ from bot import config
 from bot.db.database import SessionLocal
 from bot.models.player import Player
 from bot.models.rating import PlayerRating, RoleBaseline
-from bot.services import lobby_manager, server_setup, settings, smurf_detector
+from bot.services import account_link, lobby_manager, server_setup, settings, smurf_detector
 from bot.services.game_processor import get_or_create_rating, process_match, reprocess_match, rollback_match
 from bot.services.riot_api import RiotAPIError, RiotClient, RiotUnavailable, friendly_error, normalize_match_id
 from bot.ui import embeds
@@ -22,7 +22,7 @@ log = logging.getLogger("ranked-bot.cogs.admin")
 
 
 async def link_account(session, member: discord.abc.User, riot_id: str) -> tuple[Player, object | None]:
-    """Shared by /link (self) and /admin link. Returns (player, smurf_flag_or_None)."""
+    """Admin override used by /admin link: links without the ownership check. Returns (player, flag)."""
     if "#" not in riot_id:
         raise ValueError("Use the format `GameName#TAG` (e.g. `Faker#KR1`).")
     game_name, tag = riot_id.rsplit("#", 1)
@@ -47,6 +47,7 @@ async def link_account(session, member: discord.abc.User, riot_id: str) -> tuple
     p.riot_puuid = puuid
     p.summoner_name = summoner_name
     p.discord_username = member.name
+    p.link_verified = False          # an admin vouched for it; the player never proved ownership
     p.linked_at = datetime.now(timezone.utc)
     p.summoner_level = int(summoner.get("summonerLevel", 0)) if summoner else None
     p.riot_rank_snapshot = {"entries": entries or [], "summoner_level": p.summoner_level}
@@ -124,25 +125,102 @@ class SetupConfirmView(discord.ui.View):
         await inter.response.edit_message(content="Cancelled. Nothing was changed.", embed=None, view=None)
 
 
+class LinkVerifyView(discord.ui.View):
+    """Buttons under a /link challenge. Persistent, so they still work after a restart."""
+
+    def __init__(self, cog: "AdminCog"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="link:verify")
+    async def verify(self, inter: discord.Interaction, _b: discord.ui.Button):
+        await self.cog.handle_verify(inter)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="link:cancel")
+    async def cancel(self, inter: discord.Interaction, _b: discord.ui.Button):
+        async with SessionLocal() as session:
+            await account_link.cancel(session, str(inter.user.id))
+        await inter.response.edit_message(content="Link cancelled. Nothing was changed.", embed=None, view=None)
+
+
 class AdminCog(commands.Cog, name="Admin"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # ---- self-serve link -------------------------------------------------
-    @app_commands.command(name="link", description="Link your Riot account (GameName#TAG) so games count.")
+    async def cog_load(self):
+        self.bot.add_view(LinkVerifyView(self))
+
+    async def _notify_mods(self, guild_id: str, text: str) -> None:
+        async with SessionLocal() as session:
+            cid = await settings.mod_channel_id(session, guild_id)
+        channel = self.bot.get_channel(cid) if cid else None
+        if channel is not None:
+            try:
+                await channel.send(text)
+            except discord.HTTPException:
+                pass
+
+    # ---- self-serve link, with proof of ownership --------------------------
+    @app_commands.command(name="link", description="Link your Riot account (GameName#TAG). You'll prove it's yours.")
+    @app_commands.describe(riot_id="Your Riot ID with tag, exactly as in the League client, e.g. Danman#NA1")
     async def link(self, inter: discord.Interaction, riot_id: str):
         await inter.response.defer(ephemeral=True)
         async with SessionLocal() as session:
             try:
-                p, flag = await link_account(session, inter.user, riot_id)
-            except ValueError as e:
-                await inter.followup.send(str(e)); return
+                async with RiotClient() as riot:
+                    result = await account_link.begin(session, riot, str(inter.user.id), inter.user.name, riot_id)
+            except account_link.LinkError as e:
+                await inter.followup.send(str(e), ephemeral=True); return
             except (RiotAPIError, RiotUnavailable) as e:
-                await inter.followup.send(friendly_error(e)); return
-        await inter.followup.send(f"Linked **{p.summoner_name}**. You can `/queue` now. First {config.PLACEMENT_GAMES} games are placements.")
+                await inter.followup.send(friendly_error(e), ephemeral=True); return
+        if isinstance(result, account_link.Linked):
+            await inter.followup.send(f"Your Riot ID is updated to **{result.riot_id}**. You're all set.",
+                                      ephemeral=True)
+            return
+        await inter.followup.send(embed=await self._challenge_embed(result), view=LinkVerifyView(self),
+                                  ephemeral=True)
+
+    async def _challenge_embed(self, c: account_link.Challenge) -> discord.Embed:
+        mins = account_link.VERIFY_MINUTES
+        e = discord.Embed(
+            title=f"Prove {c.riot_id} is yours",
+            description=(f"So nobody can link an account that isn't theirs, change your League profile icon "
+                         f"to **icon #{c.icon_id}**, shown here. Every account has it.\n\n"
+                         f"**1.** In the League client, click your profile picture, top right.\n"
+                         f"**2.** Choose the icon shown here and save.\n"
+                         f"**3.** Wait about a minute, then press **Verify**.\n\n"
+                         f"You have {mins} minutes. You can change your icon back once you're verified."),
+            color=discord.Color.blurple())
+        e.set_thumbnail(url=await account_link.icon_image_url(c.icon_id))
+        if c.reclaim_from:
+            e.add_field(name="Heads up",
+                        value=f"This account is currently linked to **{c.reclaim_from}**. Verifying proves "
+                              f"it's yours and moves it to you. The moderators will be told.", inline=False)
+        e.set_footer(text=f"Your icon right now: #{c.current_icon}")
+        return e
+
+    async def handle_verify(self, inter: discord.Interaction):
+        await inter.response.defer()
+        async with SessionLocal() as session:
+            try:
+                async with RiotClient() as riot:
+                    linked = await account_link.verify(session, riot, str(inter.user.id), inter.user.name)
+            except account_link.LinkError as e:
+                await inter.followup.send(str(e), ephemeral=True); return
+            except (RiotAPIError, RiotUnavailable) as e:
+                await inter.followup.send(friendly_error(e), ephemeral=True); return
+        await inter.edit_original_response(
+            content=f"**Verified.** {linked.riot_id} is linked to you. You can change your icon back now.\n"
+                    f"You can join queues. Your first {config.PLACEMENT_GAMES} games are placements.",
+            embed=None, view=None)
+        gid = str(inter.guild_id) if inter.guild_id else None
+        if gid and linked.transferred_from:
+            await self._notify_mods(gid, f"🔁 **{linked.riot_id}** was linked to **{linked.transferred_from}**. "
+                                         f"{inter.user.mention} proved they own it, so it moved to them. "
+                                         f"{linked.transferred_from}'s ratings stay on their profile.")
         mod = self.bot.get_cog("Moderation")
-        if flag and mod:
-            await mod.post_flags(str(inter.guild_id), [flag])
+        if gid and linked.flag and mod:
+            await mod.post_flags(gid, [linked.flag])
 
     admin = app_commands.Group(name="admin", description="Admin commands (Manage Server).", default_permissions=discord.Permissions(manage_guild=True))
 
@@ -288,6 +366,51 @@ class AdminCog(commands.Cog, name="Admin"):
                         value=f"There is an open lobby in <#{lobby.channel_id}>. Once queues move to "
                               f"#inhouse-queue, cancel that lobby and open a new one there.", inline=False)
         await inter.response.send_message(embed=e, view=SetupConfirmView(inter.user.id), ephemeral=True)
+
+    @admin.command(name="testfill", description="Testing: fill the open lobby with filler players.")
+    @app_commands.describe(count="How many fillers to add. Leave empty to fill the lobby.")
+    async def admin_testfill(self, inter: discord.Interaction, count: app_commands.Range[int, 1, 10] | None = None):
+        async with SessionLocal() as session:
+            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            if lobby is None:
+                await inter.response.send_message("Open a lobby first with `/inhouse create`.", ephemeral=True)
+                return
+            try:
+                added = await lobby_manager.test_fill(session, lobby, count)
+            except lobby_manager.LobbyError as e:
+                await inter.response.send_message(str(e), ephemeral=True)
+                return
+            n = len(lobby.players)
+            lobby_cog = self.bot.get_cog("Lobby")
+            if lobby_cog:
+                await lobby_cog.refresh_lobby_message(session, lobby)
+        tips = ["They have a spread of ratings, so balancing and captain choice do something.",
+                "They are never sent to Riot, and can't show up on leaderboards.",
+                "In a captain draft, the host or an admin picks for a filler captain.",
+                "Run `/admin testclear` when you're done. It removes every filler."]
+        full = "\nThe lobby is full. Press **Start**, or run `/inhouse captains` to choose captains." \
+            if n >= lobby.max_players else ""
+        await inter.response.send_message(
+            f"Added {len(added)} filler(s): {', '.join(f.discord_username for f in added)}. "
+            f"Lobby is {n}/{lobby.max_players}.{full}\n" + "\n".join(f"- {t}" for t in tips), ephemeral=True)
+
+    @admin.command(name="testclear", description="Testing: remove every filler player.")
+    async def admin_testclear(self, inter: discord.Interaction):
+        async with SessionLocal() as session:
+            removed, cancelled = await lobby_manager.test_clear(session)
+            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            lobby_cog = self.bot.get_cog("Lobby")
+            if lobby and lobby_cog:
+                await session.refresh(lobby)
+                await lobby_cog.refresh_lobby_message(session, lobby)
+        if not removed:
+            await inter.response.send_message("There are no fillers to remove.", ephemeral=True)
+            return
+        extra = (f" {cancelled} lobby that already had teams with fillers was cancelled; open a new one."
+                 if cancelled == 1 else
+                 f" {cancelled} lobbies that already had teams with fillers were cancelled." if cancelled else "")
+        await inter.response.send_message(f"Removed {removed} filler(s) and everything they touched.{extra}",
+                                          ephemeral=True)
 
     @admin.command(name="modes", description="Choose which lobby modes hosts can open, the default, and casual lobbies.")
     @app_commands.describe(

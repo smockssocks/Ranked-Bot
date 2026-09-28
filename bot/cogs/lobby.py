@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import discord
 from discord import app_commands
@@ -26,6 +27,34 @@ async def _names(session, lobby) -> dict[int, str]:
         p = await session.get(Player, lp.player_id)
         out[lp.player_id] = p.discord_username if p else "?"
     return out
+
+
+def _who(p: Player | None) -> str:
+    """A mention for real players; a plain name for fillers, which have no Discord account."""
+    if p is None:
+        return "?"
+    return f"**{p.discord_username}**" if p.is_test else f"<@{p.discord_id}>"
+
+
+_MENTION = re.compile(r"<@!?(\d+)>")
+
+
+async def _resolve_player(session, lobby, value: str, allowed: set[int]) -> int | None:
+    """Turn an autocomplete value, a typed name, or an @mention into a player ID from `allowed`."""
+    value = (value or "").strip()
+    if value.isdigit() and int(value) in allowed:
+        return int(value)
+    m = _MENTION.fullmatch(value)
+    names = await _names(session, lobby)
+    for pid in allowed:
+        p = await session.get(Player, pid)
+        if p is None:
+            continue
+        if m and p.discord_id == m.group(1):
+            return pid
+        if names.get(pid, "").lower() == value.lstrip("@").lower():
+            return pid
+    return None
 
 
 def _is_admin(inter: discord.Interaction) -> bool:
@@ -164,8 +193,9 @@ class LobbyCog(commands.Cog, name="Lobby"):
                     cap1, cap2 = await lobby_manager.start_captain_draft(session, lobby, random_captains)
                     await self.refresh_lobby_message(session, lobby)
                     await inter.followup.send(
-                        f"**Captain draft!**\nBlue captain: <@{cap1.discord_id}>\nRed captain: <@{cap2.discord_id}>\n\n"
-                        f"<@{cap1.discord_id}> picks first with `/inhouse pick @player` (snake order 1-2-2-1-1-2-2-1)."
+                        f"**Captain draft!**\nBlue captain: {_who(cap1)}\nRed captain: {_who(cap2)}\n\n"
+                        f"{_who(cap1)} picks first with `/inhouse pick` (snake order 1-2-2-1-1-2-2-1). "
+                        f"Not the captains you wanted? The host can run `/inhouse captains`."
                     )
                     return
                 await lobby_manager.make_teams(session, lobby)
@@ -261,32 +291,103 @@ class LobbyCog(commands.Cog, name="Lobby"):
     async def inhouse_start(self, inter: discord.Interaction, random_captains: bool = False):
         await self.handle_start(inter, random_captains)
 
+    async def _pool_autocomplete(self, inter: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        async with SessionLocal() as session:
+            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            if lobby is None or lobby.status != "drafting":
+                return []
+            names = await _names(session, lobby)
+            pool = list((lobby.draft_state or {}).get("pool", []))
+        cur = current.lower()
+        return [app_commands.Choice(name=names[pid][:100], value=str(pid))
+                for pid in pool if cur in names.get(pid, "").lower()][:25]
+
+    async def _lobby_autocomplete(self, inter: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        async with SessionLocal() as session:
+            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            if lobby is None:
+                return []
+            names = await _names(session, lobby)
+        cur = current.lower()
+        return [app_commands.Choice(name=n[:100], value=str(pid))
+                for pid, n in names.items() if cur in n.lower()][:25]
+
     @inhouse.command(name="pick", description="Captain: pick a player for your team.")
-    async def inhouse_pick(self, inter: discord.Interaction, player: discord.Member):
+    @app_commands.describe(player="Start typing a name; only players still available are listed.")
+    async def inhouse_pick(self, inter: discord.Interaction, player: str):
+        if await self._wrong_channel(inter):
+            return
+        await inter.response.defer()
+        async with SessionLocal() as session:
+            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            if lobby is None or lobby.status != "drafting":
+                await inter.followup.send("No draft in progress.")
+                return
+            pid = await _resolve_player(session, lobby, player, set(lobby.draft_state.get("pool", [])))
+            if pid is None:
+                await inter.followup.send("That player is not available to pick. Choose from the list that "
+                                          "appears as you type.")
+                return
+            turn = lobby.draft_state["pick_order"][lobby.draft_state["picks_made"]]
+            acting_cap = await session.get(Player, lobby.captain1_id if turn == 1 else lobby.captain2_id)
+            try:
+                await lobby_manager.captain_pick(session, lobby, str(inter.user.id), pid, _is_admin(inter))
+            except LobbyError as e:
+                await inter.followup.send(str(e))
+                return
+            names = await _names(session, lobby)
+            on_behalf = "" if acting_cap and acting_cap.discord_id == str(inter.user.id) else \
+                f" for {_who(acting_cap)}"
+            if lobby.status == "active":
+                await self.refresh_lobby_message(session, lobby)
+                await inter.followup.send(f"Picked **{names[pid]}**{on_behalf}. **Draft complete!** Roles below are "
+                                          f"suggestions from preferences; captains can move players with `/inhouse role`.")
+                await self.announce_teams(inter.followup, session, lobby, names)
+            else:
+                nxt = lobby_manager.current_captain_id(lobby)
+                cap = await session.get(Player, nxt) if nxt else None
+                pool = [names[p] for p in lobby.draft_state["pool"]]
+                note = " (a filler: the host picks for them)" if cap and cap.is_test else ""
+                await inter.followup.send(f"Picked **{names[pid]}**{on_behalf}. Available: {', '.join(pool)}\n"
+                                          f"{_who(cap)}{note}, your pick.")
+
+    inhouse_pick.autocomplete("player")(_pool_autocomplete)
+
+    @inhouse.command(name="captains", description="Host/admin: choose the two captains and start (or restart) the draft.")
+    @app_commands.describe(blue="Blue side captain, picks first", red="Red side captain")
+    async def inhouse_captains(self, inter: discord.Interaction, blue: str, red: str):
         if await self._wrong_channel(inter):
             return
         await inter.response.defer()
         async with SessionLocal() as session:
             lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
             if lobby is None:
-                await inter.followup.send("No active lobby.")
+                await inter.followup.send("No open lobby.")
                 return
+            members = {lp.player_id for lp in lobby.players}
+            b = await _resolve_player(session, lobby, blue, members)
+            r = await _resolve_player(session, lobby, red, members)
+            if b is None or r is None:
+                await inter.followup.send("Both captains have to be in this lobby. Choose from the list that "
+                                          "appears as you type.")
+                return
+            restarting = lobby.status == "drafting"
             try:
-                await lobby_manager.captain_pick(session, lobby, str(inter.user.id), str(player.id))
+                cap1, cap2 = await lobby_manager.force_captains(session, lobby, str(inter.user.id),
+                                                                 _is_admin(inter), b, r)
             except LobbyError as e:
                 await inter.followup.send(str(e))
                 return
-            names = await _names(session, lobby)
-            if lobby.status == "active":
-                await self.refresh_lobby_message(session, lobby)
-                await inter.followup.send("**Draft complete!** Roles below are suggestions from preferences; captains can move players with `/inhouse role`.")
-                await self.announce_teams(inter.followup, session, lobby, names)
-            else:
-                nxt = lobby_manager.current_captain_id(lobby)
-                cap = await session.get(Player, nxt) if nxt else None
-                pool = [names[pid] for pid in lobby.draft_state["pool"]]
-                await inter.followup.send(f"Picked **{player.display_name}**. Available: {', '.join(pool)}\n"
-                                          f"<@{cap.discord_id if cap else '?'}>, your pick.")
+            await self.refresh_lobby_message(session, lobby)
+        what = "Draft restarted" if restarting else "Captain draft started"
+        filler_note = ("\nA filler captain can't pick, so the host or an admin picks for them."
+                       if cap1.is_test or cap2.is_test else "")
+        await inter.followup.send(f"**{what}** by {inter.user.mention}.\nBlue captain: {_who(cap1)}\n"
+                                  f"Red captain: {_who(cap2)}\n\n{_who(cap1)} picks first with `/inhouse pick`."
+                                  f"{filler_note}")
+
+    inhouse_captains.autocomplete("blue")(_lobby_autocomplete)
+    inhouse_captains.autocomplete("red")(_lobby_autocomplete)
 
     @inhouse.command(name="forcequeue", description="Host/admin: put a player into the queue for them.")
     @app_commands.describe(player="Who to add", role="Their preferred role (balanced and captain lobbies only)",

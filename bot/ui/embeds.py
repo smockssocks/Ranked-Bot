@@ -117,7 +117,8 @@ def versatility_of(role_rows: list):
     return versatility({r.role: (r.games_played, r.perf_mean) for r in role_rows if r.role != "OVERALL"})
 
 
-def rank_embed(name: str, overall, role_rows: list, summoner: str | None, recent: list) -> discord.Embed:
+def rank_embed(name: str, overall, role_rows: list, summoner: str | None, recent: list,
+               verified: bool = False) -> discord.Embed:
     e = discord.Embed(title=f"{name}", color=discord.Color.gold())
     if overall is None or overall.games_played == 0:
         e.description = f"No games yet. Everyone starts at {config.STARTING_LP} LP; the first {config.PLACEMENT_GAMES} games are placements."
@@ -150,7 +151,7 @@ def rank_embed(name: str, overall, role_rows: list, summoner: str | None, recent
     if recent:
         e.add_field(name="Recent", value=" ".join("🟩" if p.win else "🟥" for p in recent), inline=False)
     if summoner:
-        e.set_footer(text=f"Riot: {summoner}")
+        e.set_footer(text=f"Riot: {summoner} • " + ("ownership verified" if verified else "ownership not verified"))
     return e
 
 

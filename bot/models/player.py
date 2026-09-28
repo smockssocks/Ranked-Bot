@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Boolean, Integer, DateTime, JSON, func, true
+from sqlalchemy import String, Boolean, Integer, DateTime, JSON, func, true, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from bot.db.database import Base
 
@@ -14,6 +14,11 @@ class Player(Base):
     summoner_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     riot_region: Mapped[str] = mapped_column(String(8), server_default="na1")
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=true(), default=True)
+    # True only when the player proved they own the Riot account (profile icon check).
+    # Accounts linked before verification existed, or by an admin, stay False.
+    link_verified: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
+    # Filler players from /admin testfill. Never real people; removed by /admin testclear.
+    is_test: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
     # anti-smurf signals captured at link time
     summoner_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
     riot_rank_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)

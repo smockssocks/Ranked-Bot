@@ -10,7 +10,7 @@ def how_to_play(queue_channel_id: int | None = None, chat_channel_id: int | None
 **1. Link your account (once)**
 Run `/link` with your full Riot ID, for example:
 `/link Danman#NA1`
-That is the name and tag exactly as they appear in the League client. You cannot join a queue until you do this.
+That is the name and tag exactly as they appear in the League client. The bot asks you to switch your profile icon once to prove it's your account. You cannot join a queue until you do this.
 
 **2. Join the queue**
 All queues happen in {queue}.{chat}

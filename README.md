@@ -148,6 +148,8 @@ test custom will not show up, so test the pipeline with `/admin submit` on a pas
 - **Casual lobbies** (`/inhouse create casual:True`) post results but never touch LP, the
   community role averages, or the anti-smurf checks.
 - `/inhouse teams`, `/inhouse status`, `/inhouse cancel`.
+- `/inhouse captains` lets the host or an admin choose both captains (starting or restarting
+  the draft). `/inhouse pick` shows a dropdown of only the players still available.
 - `/inhouse forcequeue @player` and `/inhouse forceremove @player` let the host or an admin
   add someone to the queue, or take out someone who went AFK, while the lobby is filling.
 - Lobbies that never produce a game are auto-cancelled after `AUTO_DETECT_MAX_AGE_HOURS`.
@@ -223,6 +225,7 @@ knows about you. `CHAT_PERSONA` in `.env` changes its personality.
 | `/admin reprocess GAME_ID` | Rollback + process again (after tuning the model). Most recent games only. |
 | `/admin reset @player` | Back to 1000 LP and placements. |
 | `/admin modes` | Choose which lobby modes hosts can open, the default mode, and whether casual lobbies are allowed. No options shows the current setup. |
+| `/admin testfill [count]`, `/admin testclear` | Fill the open lobby with filler players to test queues, balancing and drafts without 10 people; remove every filler afterwards. |
 | `/admin setup` | Build the whole server layout, channels, voice rooms and mod role, and wire the bot to them. Preview first; additive only. |
 | `/admin queuechannel` | Lock every queue command and lobby button to one channel. Run it with no options to see the current setting, or `clear:True` to allow any channel. |
 | `/admin modchannel`, `/admin resultschannel` | Channels. |
@@ -338,6 +341,32 @@ is off, edit `ROLE_WEIGHTS` in `rating_engine.py`, compare with `/admin baseline
 `/admin reprocess` recent games.
 
 ---
+
+## Account verification
+
+`/link` makes players prove they own the Riot account, so nobody can link someone else's main
+and take credit for their games. The bot names one of the starter profile icons every account
+owns; the player switches to it in the League client and presses **Verify**, and the bot checks
+the change through the Riot API. Riot removed its in-client verification code, so this icon
+check is the standard method.
+
+- A challenge lasts 10 minutes. Running `/link` again keeps the same icon while it's valid.
+- Correcting a renamed Riot ID on an already-verified account needs no check.
+- Switching to a **different** account is not self-service. A moderator runs `/admin unlink`
+  first, which stops people hopping between accounts.
+- If someone else had linked the account, verifying moves it to the real owner and the
+  moderators are told. The other player's ratings stay on their own profile.
+- `/admin link` is an admin override and is recorded as not verified. `/rank` shows whether
+  each player's ownership is verified. Accounts linked before this feature show as not
+  verified until the player runs `/link` once more.
+
+## Testing without ten people
+
+`/admin testfill` tops up the open lobby with filler players. They have a spread of ratings so
+balancing does something visible, are never sent to Riot, and never appear on leaderboards.
+In a captain draft, `/inhouse captains` can make you one captain and a filler the other; the
+host or an admin picks on a filler captain's behalf, so a whole draft can be run alone.
+`/admin testclear` removes every filler and anything they touched.
 
 ## Your data, backups and updating
 

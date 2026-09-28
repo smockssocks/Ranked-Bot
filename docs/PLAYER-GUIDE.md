@@ -17,7 +17,7 @@ queue channel. If you'd rather post it yourself, it fits in one Discord message;
 **1. Link your account (once)**
 Run `/link` with your full Riot ID, for example:
 `/link Danman#NA1`
-That is the name and tag exactly as they appear in the League client. You cannot join a queue until you do this.
+That is the name and tag exactly as they appear in the League client. The bot asks you to switch your profile icon once to prove it's your account. You cannot join a queue until you do this.
 
 **2. Join the queue**
 All queues happen in #inhouse-queue.
@@ -127,6 +127,12 @@ practice, or teaching a newcomer. Hosts open one with `/inhouse create casual:Tr
    take their slots in pick order, top slot first.
 5. Play. The bot posts results and closes the lobby by itself.
 
+In a captain draft, `/inhouse captains` lets you choose both captains instead of the bot. If a
+captain goes AFK, you can make their picks with `/inhouse pick`, unless you are the other captain.
+
+Testing on your own? `/admin testfill` fills the lobby with filler players and `/admin testclear`
+removes them afterwards.
+
 Someone not at their keyboard? `/inhouse forcequeue @player` adds them for you, and
 `/inhouse forceremove @player` takes out someone who went AFK. Both work while the lobby is
 filling, for the host or an admin.
@@ -154,6 +160,10 @@ They were favoured, or they were carried. Both reduce the gain.
 
 **"My rank says placements."**
 First 5 games. LP moves about twice as fast until they are done.
+
+**"Why do I have to change my icon to link?"**
+It proves the account is theirs, so nobody can link someone else's main. It takes a minute and
+they can change it straight back afterwards.
 
 **"I can't join the queue."**
 They have not run `/link`, or they are in the wrong channel.

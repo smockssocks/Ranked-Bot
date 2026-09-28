@@ -156,8 +156,15 @@ it is running. Leave the window open.** Closing it turns the bot off.
    If it says it is **missing permissions**, it gives you a link to fix that in one click.
    Your bot needs Manage Channels, Manage Roles and Manage Messages to build the server.
 3. Give your moderators the **@Inhouse Mod** role.
-4. Everyone who wants to play runs `/link` once, for example `/link Danman#NA1`.
-   Nobody can join a queue until they have linked.
+4. Everyone who wants to play runs `/link` once, for example `/link Danman#NA1`. The bot shows
+   them a profile icon to switch to in the League client and a **Verify** button. That proves
+   the account is theirs. Nobody can join a queue until they have linked.
+
+**Testing on your own:** open a lobby with `/inhouse create`, join it, then run `/admin testfill`
+to fill the other nine spots with fillers. Press **Start** to see teams made. For a captain
+draft, use `/inhouse create mode:Captain draft`, fill it, then `/inhouse captains` to make
+yourself one captain and a filler the other, and pick for both sides. `/admin testclear`
+cleans up afterwards.
 
 To test that scoring works without playing a fresh game, find any past 10-player custom
 game and run `/admin submit` with the number from its post-game screen, for example

@@ -163,6 +163,86 @@ async def force_remove(session: AsyncSession, lobby: Lobby, requester_discord_id
 
 
 # ------------------------------------------------------------------ #
+# Test fillers                                                         #
+# ------------------------------------------------------------------ #
+
+FILLER_PREFIX = "filler-"
+
+
+async def test_fill(session: AsyncSession, lobby: Lobby, count: int | None = None,
+                    rng: random.Random | None = None) -> list[Player]:
+    """
+    Fill the lobby with filler players for testing. Fillers get a spread of ratings so
+    balancing has something to do, and random role preferences for role-queue modes.
+    Existing idle fillers are reused before new ones are made.
+    """
+    rng = rng or random.Random()
+    if lobby.status != "waiting":
+        raise LobbyError("Fillers can only be added while the lobby is filling.")
+    room = lobby.max_players - len(lobby.players)
+    n = room if count is None else min(count, room)
+    if n <= 0:
+        raise LobbyError("The lobby is already full.")
+    from bot.services.game_processor import get_or_create_rating
+
+    in_lobby = {lp.player_id for lp in lobby.players}
+    fillers = (await session.execute(select(Player).where(Player.is_test.is_(True))
+                                     .order_by(Player.id))).scalars().all()
+    idle = [f for f in fillers if f.id not in in_lobby]
+    next_no = 1 + max((int(f.discord_id[len(FILLER_PREFIX):]) for f in fillers
+                       if f.discord_id.startswith(FILLER_PREFIX) and f.discord_id[len(FILLER_PREFIX):].isdigit()),
+                      default=0)
+    added: list[Player] = []
+    for _ in range(n):
+        if idle:
+            f = idle.pop(0)
+        else:
+            f = Player(discord_id=f"{FILLER_PREFIX}{next_no}", discord_username=f"Filler {next_no}",
+                       riot_puuid=f"{FILLER_PREFIX}{next_no}", summoner_name=f"Filler{next_no}#TEST",
+                       is_test=True, link_verified=False)
+            session.add(f)
+            await session.flush()
+            r = await get_or_create_rating(session, f.id, "OVERALL", config.CURRENT_SEASON)
+            r.mmr = round(max(1100.0, min(1900.0, rng.gauss(config.STARTING_MMR, 180.0))), 1)
+            next_no += 1
+        roles = rng.sample(list(ROLES), 2)
+        await queue_player(session, lobby, f.discord_id, roles[0], roles[1])
+        added.append(f)
+    return added
+
+
+async def test_clear(session: AsyncSession) -> tuple[int, int]:
+    """
+    Remove every filler and everything that references one. Lobbies that already
+    had teams made with fillers in them are cancelled, since those teams no longer
+    exist. Returns (fillers removed, lobbies cancelled).
+    """
+    from sqlalchemy import delete, update
+    from bot.models.game import GameParticipant
+    from bot.models.rating import PlayerRating
+    from bot.models.smurf import SmurfFlag
+
+    ids = list((await session.execute(select(Player.id).where(Player.is_test.is_(True)))).scalars().all())
+    if not ids:
+        return 0, 0
+    touched = (await session.execute(
+        select(Lobby).join(LobbyPlayer, LobbyPlayer.lobby_id == Lobby.id)
+        .where(LobbyPlayer.player_id.in_(ids), Lobby.status.in_(("drafting", "active"))))).scalars().unique().all()
+    for lobby in touched:
+        lobby.status = "cancelled"
+    await session.execute(update(Lobby).where(Lobby.captain1_id.in_(ids)).values(captain1_id=None))
+    await session.execute(update(Lobby).where(Lobby.captain2_id.in_(ids)).values(captain2_id=None))
+    await session.execute(delete(LobbyPlayer).where(LobbyPlayer.player_id.in_(ids)))
+    await session.execute(delete(PlayerRating).where(PlayerRating.player_id.in_(ids)))
+    await session.execute(delete(GameParticipant).where(GameParticipant.player_id.in_(ids)))
+    await session.execute(delete(SmurfFlag).where(SmurfFlag.player_id.in_(ids)))
+    await session.execute(update(SmurfFlag).where(SmurfFlag.matched_player_id.in_(ids)).values(matched_player_id=None))
+    await session.execute(delete(Player).where(Player.id.in_(ids)))
+    await session.commit()
+    return len(ids), len(touched)
+
+
+# ------------------------------------------------------------------ #
 # Ratings lookup                                                       #
 # ------------------------------------------------------------------ #
 
@@ -351,12 +431,16 @@ async def make_teams(session: AsyncSession, lobby: Lobby) -> tuple[list[LobbyPla
 # Captain draft                                                        #
 # ------------------------------------------------------------------ #
 
-async def start_captain_draft(session: AsyncSession, lobby: Lobby, random_captains: bool = False) -> tuple[Player, Player]:
+async def start_captain_draft(session: AsyncSession, lobby: Lobby, random_captains: bool = False,
+                              captain_ids: tuple[int, int] | None = None) -> tuple[Player, Player]:
+    """captain_ids = (blue captain, red captain) as player IDs, when chosen by a host or admin."""
     if len(lobby.players) < lobby.max_players:
         raise LobbyError(f"Need {lobby.max_players} players to start the draft.")
     ratings = await lobby_ratings(session, lobby)
     ids = [lp.player_id for lp in lobby.players]
-    if random_captains:
+    if captain_ids is not None:
+        cap1_id, cap2_id = captain_ids
+    elif random_captains:
         random.shuffle(ids)
         cap1_id, cap2_id = ids[0], ids[1]
     else:
@@ -375,9 +459,29 @@ async def start_captain_draft(session: AsyncSession, lobby: Lobby, random_captai
         elif lp.player_id == cap2_id:
             lp.team, lp.pick_order = 2, -1
         else:
-            lp.team = None
+            lp.team, lp.pick_order = None, None
     await session.commit()
     return await session.get(Player, cap1_id), await session.get(Player, cap2_id)
+
+
+async def force_captains(session: AsyncSession, lobby: Lobby, requester_discord_id: str, is_admin: bool,
+                         blue_captain_id: int, red_captain_id: int) -> tuple[Player, Player]:
+    """
+    Host or admin chooses the two captains. Works on a full lobby that is still filling
+    (and starts the draft), or during a draft (which restarts it with the new captains).
+    """
+    _require_host_or_admin(lobby, requester_discord_id, is_admin, "choose captains")
+    if lobby.mode != "captain":
+        raise LobbyError("Captains are only used in Captain draft lobbies. Open one with "
+                         "`/inhouse create mode:Captain draft`.")
+    if lobby.status not in ("waiting", "drafting"):
+        raise LobbyError("Teams are already set. Cancel the lobby and open a new one to change captains.")
+    if blue_captain_id == red_captain_id:
+        raise LobbyError("Pick two different captains.")
+    in_lobby = {lp.player_id for lp in lobby.players}
+    if blue_captain_id not in in_lobby or red_captain_id not in in_lobby:
+        raise LobbyError("Both captains have to be in this lobby.")
+    return await start_captain_draft(session, lobby, captain_ids=(blue_captain_id, red_captain_id))
 
 
 def current_captain_id(lobby: Lobby) -> int | None:
@@ -388,15 +492,28 @@ def current_captain_id(lobby: Lobby) -> int | None:
     return lobby.captain1_id if turn == 1 else lobby.captain2_id
 
 
-async def captain_pick(session: AsyncSession, lobby: Lobby, captain_discord_id: str, pick_discord_id: str) -> dict:
+async def captain_pick(session: AsyncSession, lobby: Lobby, requester_discord_id: str, pick_player_id: int,
+                       is_admin: bool = False) -> dict:
+    """
+    The captain whose turn it is picks a player. The host or an admin may pick on that
+    captain's behalf (a filler captain, or someone AFK), but never if they are the
+    OTHER captain, so a host-captain cannot choose players for the opposing team.
+    Fillers are the exception: picking for a filler captain is always allowed to a
+    host or admin, so a draft can be tested alone.
+    """
     if lobby.status != "drafting":
         raise LobbyError("No draft in progress.")
     ds = dict(lobby.draft_state or {})
     turn = ds["pick_order"][ds["picks_made"]]
     cap = await session.get(Player, lobby.captain1_id if turn == 1 else lobby.captain2_id)
-    if cap is None or cap.discord_id != captain_discord_id:
-        raise LobbyError("It's not your turn to pick.")
-    pick = await session.scalar(select(Player).where(Player.discord_id == pick_discord_id))
+    other_cap_id = lobby.captain2_id if turn == 1 else lobby.captain1_id
+    if cap is None or cap.discord_id != requester_discord_id:
+        requester = await session.scalar(select(Player).where(Player.discord_id == requester_discord_id))
+        trusted = is_admin or requester_discord_id == lobby.host_discord_id
+        is_other_captain = requester is not None and requester.id == other_cap_id
+        if not trusted or (is_other_captain and not (cap is not None and cap.is_test)):
+            raise LobbyError("It's not your turn to pick.")
+    pick = await session.get(Player, pick_player_id)
     if pick is None or pick.id not in ds["pool"]:
         raise LobbyError("That player is not available to pick.")
     for lp in lobby.players:
@@ -460,7 +577,7 @@ async def lobby_puuids(session: AsyncSession, lobby: Lobby) -> dict[str, int]:
     out: dict[str, int] = {}
     for lp in lobby.players:
         p = await session.get(Player, lp.player_id)
-        if p and p.riot_puuid:
+        if p and p.riot_puuid and not p.is_test:     # fillers have no real Riot account
             out[p.riot_puuid] = p.id
     return out
 
