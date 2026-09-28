@@ -342,6 +342,25 @@ is off, edit `ROLE_WEIGHTS` in `rating_engine.py`, compare with `/admin baseline
 
 ---
 
+## Queue bans
+
+Moderators (Manage Messages) can stop someone playing inhouses for a while without touching
+their server membership. They can still chat and check their rank.
+
+| Command | What |
+| --- | --- |
+| `/queueban add @player duration reason` | Ban for `30m`, `12h`, `3d`, `1w 2d`, … or `permanent` (anything over a year must be permanent). The reason is required. |
+| `/queueban lift @player [reason]` | End a ban early. |
+| `/queueban list` | Everyone currently banned, with time left. |
+| `/queueban history @player` | Every ban they've had, active, expired or lifted. |
+
+A banned player can't join a queue, can't be force-queued, and can't host a lobby, and `/help`
+tells them why and for how long. Banning someone takes them out of any lobby still filling; a
+game that already has teams is left alone and the ban applies from their next queue. Bans end
+on their own. The player gets a DM, and every ban and lift is logged in the mod channel. Times
+are shown with Discord timestamps, so everyone sees them in their own time zone. Bans are keyed
+by Discord account, so someone who never linked can be banned too, and they're per server.
+
 ## Account verification
 
 `/link` makes players prove they own the Riot account, so nobody can link someone else's main

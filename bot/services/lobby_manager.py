@@ -28,6 +28,7 @@ from bot import config
 from bot.models.lobby import Lobby, LobbyPlayer
 from bot.models.player import Player
 from bot.models.rating import PlayerRating
+from bot.services import bans
 from bot.services.rating_engine import ROLES, normalize_role, ROLE_DISPLAY
 
 log = logging.getLogger("ranked-bot.lobby")
@@ -48,6 +49,9 @@ async def create_lobby(session: AsyncSession, guild_id: str, channel_id: str, ho
                        mode: str = "pick_order", max_players: int | None = None, ranked: bool = True) -> Lobby:
     if mode not in MODES:
         raise LobbyError(f"Unknown mode '{mode}'. Choose from: {', '.join(MODES)}")
+    banned = await bans.active_ban(session, guild_id, host_discord_id)
+    if banned is not None:
+        raise LobbyError(bans.player_message(banned) + " You can't host a lobby while banned.")
     existing = await session.scalar(select(Lobby).where(
         Lobby.guild_id == guild_id, Lobby.channel_id == channel_id, Lobby.status.in_(ACTIVE_STATUSES)))
     if existing:
@@ -91,6 +95,9 @@ async def queue_player(session: AsyncSession, lobby: Lobby, discord_id: str,
                        preferred_role: str | None = None, secondary_role: str | None = None) -> LobbyPlayer:
     if lobby.status != "waiting":
         raise LobbyError("The lobby is no longer accepting players.")
+    banned = await bans.active_ban(session, lobby.guild_id, discord_id)
+    if banned is not None:
+        raise LobbyError(bans.player_message(banned))
     p = await session.scalar(select(Player).where(Player.discord_id == discord_id))
     if p is None or p.riot_puuid is None:
         raise LobbyError("You need to link your Riot account first: `/link GameName#TAG`.")
@@ -135,6 +142,9 @@ async def force_queue(session: AsyncSession, lobby: Lobby, requester_discord_id:
     _require_host_or_admin(lobby, requester_discord_id, is_admin, "force-queue players")
     if lobby.status != "waiting":
         raise LobbyError("Teams are already made, so nobody else can join this lobby.")
+    banned = await bans.active_ban(session, lobby.guild_id, target_discord_id)
+    if banned is not None:
+        raise LobbyError(bans.player_message(banned, you=False) + " A moderator can lift it with `/queueban lift`.")
     target = await session.scalar(select(Player).where(Player.discord_id == target_discord_id))
     if target is None or target.riot_puuid is None:
         raise LobbyError("That player hasn't linked a Riot account, so their games could not be scored. "
@@ -160,6 +170,34 @@ async def force_remove(session: AsyncSession, lobby: Lobby, requester_discord_id
     await session.commit()
     await session.refresh(lobby)
     return target
+
+
+async def remove_banned_player(session: AsyncSession, guild_id: str,
+                               discord_id: str) -> tuple[Lobby | None, Lobby | None]:
+    """
+    After a ban: take the player out of any lobby that is still filling.
+    Returns (lobby they were removed from, lobby with teams already made that they are still in).
+    A game already under way is left alone; the ban applies from their next queue.
+    """
+    p = await session.scalar(select(Player).where(Player.discord_id == discord_id))
+    if p is None:
+        return None, None
+    rows = (await session.execute(
+        select(Lobby).join(LobbyPlayer, LobbyPlayer.lobby_id == Lobby.id)
+        .where(Lobby.guild_id == guild_id, LobbyPlayer.player_id == p.id,
+               Lobby.status.in_(ACTIVE_STATUSES)))).scalars().unique().all()
+    removed = started = None
+    for lobby in rows:
+        if lobby.status == "waiting":
+            lp = next((x for x in lobby.players if x.player_id == p.id), None)
+            if lp is not None:
+                await session.delete(lp)
+                await session.commit()
+                await session.refresh(lobby)
+                removed = lobby
+        else:
+            started = lobby
+    return removed, started
 
 
 # ------------------------------------------------------------------ #

@@ -140,6 +140,21 @@ filling, for the host or an admin.
 If the bot somehow misses a game, run `/inhouse submit` in the queue channel with the game ID
 from the post-game screen, for example `/inhouse submit 5650481942`. Just the number is fine.
 
+### Banning someone from inhouses
+
+Moderators can stop a player queueing for a while without kicking them from the server:
+
+```
+/queueban add @player 3d Leaving games early
+/queueban lift @player
+/queueban list
+/queueban history @player
+```
+
+Durations look like `30m`, `12h`, `3d`, `1w` or `permanent`. A banned player can't queue,
+can't be force-queued and can't host. They get a DM with the reason and when it ends, and
+the ban is logged in your mod channel. It ends on its own when the time is up.
+
 ### Things players ask
 
 **"Why did I lose LP when I played well?"**

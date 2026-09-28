@@ -10,7 +10,7 @@ from bot.db.database import SessionLocal
 from bot.models.game import Game, GameParticipant
 from bot.models.player import Player
 from bot.models.rating import PlayerRating
-from bot.services import settings
+from bot.services import bans, settings
 from bot.services.ranks import division_for_lp, tier_for_lp
 from bot.services.rating_engine import ROLE_DISPLAY
 from bot.ui import embeds
@@ -178,6 +178,10 @@ class RankingCog(commands.Cog, name="Ranking"):
                 if qc:
                     where = f"<#{qc}>"
 
+        banned = None
+        if inter.guild_id:
+            async with SessionLocal() as session:
+                banned = await bans.active_ban(session, str(inter.guild_id), str(inter.user.id))
         linked = bool(p and p.riot_puuid)
         step1 = ("~~**1. Link your Riot account**~~ ✅ done" if linked else
                  "**1. Link your Riot account**\n"
@@ -190,6 +194,8 @@ class RankingCog(commands.Cog, name="Ranking"):
             description=f"Queues happen in {where}.",
             color=discord.Color.blurple(),
         )
+        if banned is not None:
+            e.add_field(name="You're currently banned", value=bans.player_message(banned), inline=False)
         e.add_field(name="Getting started", value=step1, inline=False)
         e.add_field(
             name="2. Join the queue",
