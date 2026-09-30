@@ -24,6 +24,9 @@ class Lobby(Base):
     # Temporary Blue / Red voice channels, removed after the game.
     team1_voice_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     team2_voice_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Ready check: set while players are being asked to accept; the message showing who has.
+    ready_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ready_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     join_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     join_password: Mapped[str | None] = mapped_column(String(32), nullable=True)
     join_creator_id: Mapped[int | None] = mapped_column(Integer, nullable=True)   # player who makes the lobby
@@ -57,6 +60,7 @@ class LobbyPlayer(Base):
     # pick_order mode: champ-select pick position 1-5 within the team.
     # captain mode: the draft pick index (-1 for captains). Only compare within one mode.
     pick_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # ready check
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     lobby: Mapped["Lobby"] = relationship("Lobby", back_populates="players")

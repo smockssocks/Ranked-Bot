@@ -126,6 +126,13 @@ LOBBY_SIZE = _int("LOBBY_SIZE", 10)
 ALLOWED_MODES = [m.strip() for m in os.getenv("ALLOWED_MODES", "pick_order,balanced,captain").split(",") if m.strip()]
 DEFAULT_MODE = os.getenv("DEFAULT_MODE", "pick_order")
 CASUAL_ALLOWED = _bool("CASUAL_ALLOWED", True)
+# When a lobby fills, everyone must press Accept (like League's queue pop) before it starts.
+READY_CHECK_ENABLED = _bool("READY_CHECK_ENABLED", True)
+READY_CHECK_SECONDS = _int("READY_CHECK_SECONDS", 90)
+# Declining, leaving or not answering in time: out of the lobby and can't queue for this long.
+READY_CHECK_COOLDOWN_MINUTES = _int("READY_CHECK_COOLDOWN_MINUTES", 3)
+# Start the lobby by itself once all ten accept. Off: the host presses Start.
+READY_CHECK_AUTO_START = _bool("READY_CHECK_AUTO_START", True)
 # A private thread under the queue channel for each started inhouse, for its players and staff.
 GAME_CHANNELS_ENABLED = _bool("GAME_CHANNELS_ENABLED", True)
 # Minutes after a game ends before its thread is closed and team voice removed. 0 = never.

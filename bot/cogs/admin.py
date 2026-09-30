@@ -391,16 +391,23 @@ class AdminCog(commands.Cog, name="Admin"):
                 await inter.response.send_message(str(e), ephemeral=True)
                 return
             n = len(lobby.players)
+            await inter.response.defer(ephemeral=True)
             lobby_cog = self.bot.get_cog("Lobby")
             if lobby_cog:
                 await lobby_cog.refresh_lobby_message(session, lobby)
+                await lobby_cog.after_join(session, lobby)
         tips = ["They have a spread of ratings, so balancing and captain choice do something.",
                 "They are never sent to Riot, and can't show up on leaderboards.",
                 "In a captain draft, the host or an admin picks for a filler captain.",
                 "Run `/admin testclear` when you're done. It removes every filler."]
-        full = "\nThe lobby is full. Press **Start**, or run `/inhouse captains` to choose captains." \
-            if n >= lobby.max_players else ""
-        await inter.response.send_message(
+        if n < lobby.max_players:
+            full = ""
+        elif config.READY_CHECK_ENABLED:
+            full = ("\nThe lobby is full, so the ready check is up. Fillers accept by themselves; "
+                    "the real players in the lobby still have to press Accept.")
+        else:
+            full = "\nThe lobby is full. Press **Start**, or run `/inhouse captains` to choose captains."
+        await inter.followup.send(
             f"Added {len(added)} filler(s): {', '.join(f.discord_username for f in added)}. "
             f"Lobby is {n}/{lobby.max_players}.{full}\n" + "\n".join(f"- {t}" for t in tips), ephemeral=True)
 

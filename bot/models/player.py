@@ -19,6 +19,8 @@ class Player(Base):
     link_verified: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
     # Filler players from /admin testfill. Never real people; removed by /admin testclear.
     is_test: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
+    # Declined or missed a ready check: can't queue again until this time.
+    queue_cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # anti-smurf signals captured at link time
     summoner_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
     riot_rank_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)

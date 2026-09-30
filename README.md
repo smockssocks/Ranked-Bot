@@ -110,8 +110,17 @@ Run the test suite any time with `pytest`. It needs no network, Discord or keys.
 1. **Host:** `/inhouse create` (pick a mode, see below). The bot posts an embed with
    **Join / Leave / Start** buttons.
 2. **Players:** press **Join**, or `/queue role:Mid secondary:Top` to state role preferences.
-   The embed updates live and pings the host when it hits 10.
-3. **Host:** press **Start** (or `/inhouse start`).
+   The embed updates live.
+3. **Ready check.** At 10, the bot pings all ten players with **Accept / Decline** buttons,
+   like League's queue pop. The message shows who has accepted as it happens and counts down.
+   Decline, **Leave**, or no answer within `READY_CHECK_SECONDS` (90) and you're out of the
+   lobby and can't queue for `READY_CHECK_COOLDOWN_MINUTES` (3); everyone who accepted keeps
+   their spot and the queue reopens. Fillers accept by themselves. A host's
+   `/inhouse forceremove` calls the check off without a timeout, and `/inhouse forcequeue`
+   ignores one. When all ten accept, the lobby starts by itself
+   (`READY_CHECK_AUTO_START=false` makes the host press **Start** instead;
+   `READY_CHECK_ENABLED=false` turns ready checks off).
+4. **Starting** (automatic after the ready check, or **Start** / `/inhouse start`):
    - **Pick order** (the default): the bot makes the fairest split by rating and gives each
      player a pick position 1 to 5. There is no role queue. Pick 1 claims their role first in
      champ select. Positions rotate, so players who had late picks recently get early ones.
@@ -128,16 +137,16 @@ Run the test suite any time with `pytest`. It needs no network, Discord or keys.
    into the game: a **tournament code** if you have Riot's approval
    ([TOURNAMENT-CODES.md](TOURNAMENT-CODES.md)), otherwise a lobby name and password. Each
    team gets its own voice channel. See [Game threads and team voice](#game-threads-and-team-voice).
-4. If `DRAFTER_API_KEY` is set, the teams embed includes **blue / red / spectator** draft links.
+5. If `DRAFTER_API_KEY` is set, the teams embed includes **blue / red / spectator** draft links.
    Captains draft on drafter.lol; the bot posts picks and bans when the draft completes. Create
    the custom lobby in the client as **Tournament Draft** and lock in the same champions.
-5. **Play the game.** Nothing else to do.
-6. Within about two minutes of the game ending (`AUTO_DETECT_POLL_SECS`) the bot finds it in
+6. **Play the game.** Nothing else to do.
+7. Within about two minutes of the game ending (`AUTO_DETECT_POLL_SECS`) the bot finds it in
    the players' match history, processes it, posts a results embed (LP changes, performance
    score, MVP) in the lobby channel, and closes the lobby. If it somehow misses it,
    `/inhouse submit 5650481942` does the same thing manually. Use the game ID from the
    post-game screen; the bot adds the region prefix itself.
-7. Players check `/rank`, `/history`, and `/explain` to see exactly why they gained or lost LP.
+8. Players check `/rank`, `/history`, and `/explain` to see exactly why they gained or lost LP.
 
 Note: Riot only saves custom games to match history when they are real 5v5 games; a two-player
 test custom will not show up, so test the pipeline with `/admin submit` on a past game.
@@ -153,6 +162,8 @@ test custom will not show up, so test the pipeline with `/admin submit` on a pas
   draft use role preferences. Admins switch modes on and off with `/admin modes`.
 - **Casual lobbies** (`/inhouse create casual:True`) post results but never touch LP, the
   community role averages, or the anti-smurf checks.
+- **Ready check** when a lobby fills: Accept / Decline buttons that update live, a 3-minute
+  queue timeout for declining or not answering, and the lobby starts once all ten accept.
 - `/inhouse teams`, `/inhouse status`, `/inhouse cancel`.
 - `/inhouse captains` lets the host or an admin choose both captains (starting or restarting
   the draft). `/inhouse pick` shows a dropdown of only the players still available.

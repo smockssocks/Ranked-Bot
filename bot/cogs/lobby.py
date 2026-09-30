@@ -5,13 +5,13 @@ import re
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from sqlalchemy import select
 
 from bot import config
 from bot.db.database import SessionLocal
 from bot.models.player import Player
-from bot.services import drafter_api, game_channel, lobby_manager, settings
+from bot.services import drafter_api, game_channel, lobby_manager, ready_check, settings
 from bot.services.lobby_manager import LobbyError
 from bot.services.rating_engine import ROLES, ROLE_DISPLAY
 from bot.ui import embeds
@@ -88,12 +88,37 @@ class LobbyView(discord.ui.View):
         await self.cog.handle_start(inter)
 
 
+class ReadyView(discord.ui.View):
+    """Persistent Accept / Decline buttons on a ready check."""
+
+    def __init__(self, cog: "LobbyCog"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Accept", emoji="✅", style=discord.ButtonStyle.success, custom_id="ready:accept")
+    async def accept(self, inter: discord.Interaction, _b: discord.ui.Button):
+        await self.cog.handle_ready_accept(inter)
+
+    @discord.ui.button(label="Decline", emoji="✖️", style=discord.ButtonStyle.danger, custom_id="ready:decline")
+    async def decline(self, inter: discord.Interaction, _b: discord.ui.Button):
+        await self.cog.handle_ready_decline(inter)
+
+
+MENTION_USERS = discord.AllowedMentions(users=True, roles=False, everyone=False)
+
+
 class LobbyCog(commands.Cog, name="Lobby"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     async def cog_load(self):
         self.bot.add_view(LobbyView(self))
+        self.bot.add_view(ReadyView(self))
+        if config.READY_CHECK_ENABLED:
+            self.ready_check_timeouts.start()
+
+    async def cog_unload(self):
+        self.ready_check_timeouts.cancel()
 
     async def _wrong_channel(self, inter: discord.Interaction) -> bool:
         """
@@ -174,6 +199,10 @@ class LobbyCog(commands.Cog, name="Lobby"):
         return " ".join(out)
 
     async def refresh_lobby_message(self, session, lobby):
+        if lobby.ready_message_id and not ready_check.running(lobby):
+            # Called off by a host removal, a ban or a cancel: say so on the ready check.
+            await self.close_ready_message(session, lobby, "cancelled",
+                                           "The lobby changed before everyone accepted.")
         if not lobby.message_id:
             return
         try:
@@ -209,10 +238,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
                         "position when teams are made, and roles are claimed in champ select in pick order.")
             await inter.followup.send(f"You're in ({n}/{lobby.max_players}).{note}", ephemeral=True)
             await self.refresh_lobby_message(session, lobby)
-            if n >= lobby.max_players:
-                channel = self.bot.get_channel(int(lobby.channel_id))
-                if channel:
-                    await channel.send(f"**Lobby #{lobby.id} is full!** <@{lobby.host_discord_id}> press **Start** or run `/inhouse start`.")
+            await self.after_join(session, lobby)
 
     async def handle_leave(self, inter: discord.Interaction):
         if await self._wrong_channel(inter):
@@ -222,6 +248,9 @@ class LobbyCog(commands.Cog, name="Lobby"):
             lobby = await self._lobby_here(session, inter)
             if lobby is None:
                 await inter.followup.send("No open lobby.", ephemeral=True)
+                return
+            if ready_check.running(lobby):
+                await self._decline(session, lobby, inter, "left")
                 return
             try:
                 await lobby_manager.dequeue_player(session, lobby, str(inter.user.id))
@@ -249,19 +278,214 @@ class LobbyCog(commands.Cog, name="Lobby"):
             if len(lobby.players) < lobby.max_players:
                 await inter.followup.send(f"Not enough players ({len(lobby.players)}/{lobby.max_players}).")
                 return
-            names = await _names(session, lobby)
-            try:
-                if lobby.mode == "captain":
-                    cap1, cap2 = await lobby_manager.start_captain_draft(session, lobby, random_captains)
-                    await self.refresh_lobby_message(session, lobby)
-                    await self.start_captain_space(session, lobby, cap1, cap2, inter.followup)
-                    return
-                await lobby_manager.make_teams(session, lobby)
-            except LobbyError as e:
-                await inter.followup.send(str(e))
+            if config.READY_CHECK_ENABLED and not await ready_check.everyone_accepted(session, lobby):
+                if ready_check.running(lobby):
+                    rows = await ready_check.rows(session, lobby)
+                    await inter.followup.send(
+                        f"Waiting on the ready check: {sum(r.accepted for r in rows)}/{len(rows)} accepted. "
+                        f"To swap out someone who's AFK, use `/inhouse forceremove`.", ephemeral=True)
+                else:
+                    await inter.followup.send("Everyone has to accept first. Starting a ready check.", ephemeral=True)
+                    await self.start_ready_check(session, lobby)
                 return
-            await self.refresh_lobby_message(session, lobby)
-            await self.announce_teams(session, lobby, names, public=inter.followup)
+            await self.start_lobby(session, lobby, inter.followup, random_captains)
+
+    async def start_lobby(self, session, lobby, public, random_captains: bool = False):
+        """Make teams (or start the captain draft) and tell everyone. `public` is where to post."""
+        names = await _names(session, lobby)
+        try:
+            if lobby.mode == "captain":
+                cap1, cap2 = await lobby_manager.start_captain_draft(session, lobby, random_captains)
+                await self.refresh_lobby_message(session, lobby)
+                await self.start_captain_space(session, lobby, cap1, cap2, public)
+                return
+            await lobby_manager.make_teams(session, lobby)
+        except LobbyError as e:
+            await public.send(str(e))
+            return
+        await self.refresh_lobby_message(session, lobby)
+        await self.announce_teams(session, lobby, names, public=public)
+
+    # ------------------------------------------------------------------ #
+    # ready check                                                          #
+    # ------------------------------------------------------------------ #
+
+    async def _queue_channel(self, lobby):
+        cid = int(lobby.channel_id) if str(lobby.channel_id).isdigit() else None
+        if cid is None:
+            return None
+        ch = self.bot.get_channel(cid)
+        if ch is None:
+            try:
+                ch = await self.bot.fetch_channel(cid)
+            except discord.HTTPException:
+                return None
+        return ch
+
+    async def after_join(self, session, lobby):
+        """Someone joined. A full lobby starts a ready check (or, with those off, pings the host)."""
+        if lobby.status != "waiting" or len(lobby.players) < lobby.max_players or ready_check.running(lobby):
+            return
+        if not config.READY_CHECK_ENABLED:
+            channel = await self._queue_channel(lobby)
+            if channel is not None:
+                await channel.send(f"**Lobby #{lobby.id} is full!** <@{lobby.host_discord_id}> press **Start** "
+                                   f"or run `/inhouse start`.", allowed_mentions=MENTION_USERS)
+            return
+        await self.start_ready_check(session, lobby)
+
+    async def start_ready_check(self, session, lobby):
+        """Ping everyone in the lobby with Accept / Decline buttons."""
+        try:
+            await ready_check.begin(session, lobby)
+        except ready_check.ReadyCheckError:
+            return
+        await self.refresh_lobby_message(session, lobby)
+        if await ready_check.everyone_accepted(session, lobby):      # nothing but fillers
+            await self.finish_ready_check(session, lobby)
+            return
+        rows = await ready_check.rows(session, lobby)
+        pings = " ".join(f"<@{r.player.discord_id}>" for r in rows if not r.player.is_test)
+        channel = await self._queue_channel(lobby)
+        if channel is None:
+            log.warning("no queue channel for lobby %s; skipping its ready check", lobby.id)
+            await ready_check.end(session, lobby)
+            return
+        try:
+            msg = await channel.send(
+                f"{pings}\n**Your inhouse is ready!** Press **Accept** within "
+                f"{config.READY_CHECK_SECONDS} seconds.",
+                embed=embeds.ready_embed(lobby, rows), view=ReadyView(self), allowed_mentions=MENTION_USERS)
+        except discord.HTTPException as e:
+            # Nobody can be asked, so don't hold the lobby hostage: skip the check.
+            log.warning("could not post ready check for lobby %s: %s", lobby.id, e)
+            await ready_check.end(session, lobby)
+            return
+        lobby.ready_message_id = str(msg.id)
+        await session.commit()
+
+    async def close_ready_message(self, session, lobby, outcome: str, note: str = "",
+                                  rows=None, out_ids=frozenset()):
+        """Final state on the ready check message; its buttons go away."""
+        mid = lobby.ready_message_id
+        if not mid:
+            return
+        rows = rows if rows is not None else await ready_check.rows(session, lobby)
+        lobby.ready_message_id = None
+        await session.commit()
+        channel = await self._queue_channel(lobby)
+        if channel is None:
+            return
+        try:
+            await channel.get_partial_message(int(mid)).edit(
+                embed=embeds.ready_embed(lobby, rows, outcome, note, out_ids), view=None)
+        except discord.HTTPException as e:
+            log.warning("could not update ready check message %s: %s", mid, e)
+
+    async def finish_ready_check(self, session, lobby):
+        rows = await ready_check.rows(session, lobby)
+        if not await ready_check.end(session, lobby):
+            return                      # a simultaneous Accept, or the timer, got there first
+        await self.everyone_in(session, lobby, rows)
+
+    async def everyone_in(self, session, lobby, rows):
+        auto = config.READY_CHECK_AUTO_START
+        await self.close_ready_message(session, lobby, "accepted",
+                                       "Starting the lobby." if auto else "Waiting for the host to press Start.",
+                                       rows)
+        await self.refresh_lobby_message(session, lobby)
+        channel = await self._queue_channel(lobby)
+        if channel is None:
+            return
+        if auto:
+            await self.start_lobby(session, lobby, channel)
+        else:
+            await channel.send(f"**Everyone accepted!** <@{lobby.host_discord_id}> press **Start** or run "
+                               f"`/inhouse start`.", allowed_mentions=MENTION_USERS)
+
+    async def handle_ready_accept(self, inter: discord.Interaction):
+        await inter.response.defer()
+        async with SessionLocal() as session:
+            lobby = await ready_check.lobby_for_message(session, inter.message.id)
+            if lobby is None or not ready_check.running(lobby):
+                await inter.followup.send("This ready check is over.", ephemeral=True)
+                return
+            try:
+                await ready_check.accept(session, lobby, str(inter.user.id))
+            except ready_check.ReadyCheckError as e:
+                await inter.followup.send(str(e), ephemeral=True)
+                return
+            if await ready_check.everyone_accepted(session, lobby):
+                await self.finish_ready_check(session, lobby)
+                return
+            rows = await ready_check.rows(session, lobby)
+            try:
+                await inter.edit_original_response(embed=embeds.ready_embed(lobby, rows))
+            except discord.HTTPException as e:
+                log.warning("could not update ready check: %s", e)
+
+    async def handle_ready_decline(self, inter: discord.Interaction):
+        await inter.response.defer()
+        async with SessionLocal() as session:
+            lobby = await ready_check.lobby_for_message(session, inter.message.id)
+            if lobby is None or not ready_check.running(lobby):
+                await inter.followup.send("This ready check is over.", ephemeral=True)
+                return
+            await self._decline(session, lobby, inter, "declined")
+
+    async def _decline(self, session, lobby, inter: discord.Interaction, verb: str):
+        """Decline (or Leave during a ready check): out of the lobby, with a cooldown."""
+        rows = await ready_check.rows(session, lobby)
+        try:
+            p = await ready_check.decline(session, lobby, str(inter.user.id))
+        except ready_check.ReadyCheckError as e:
+            await inter.followup.send(str(e), ephemeral=True)
+            return
+        until = ready_check.cooldown_left(p)
+        await inter.followup.send(
+            f"You {verb} the ready check and are out of the lobby."
+            + (f" {ready_check.cooldown_message(until)}" if until else ""), ephemeral=True)
+        await self.close_ready_message(
+            session, lobby, "declined",
+            f"{_who(p)} {verb}. Everyone else keeps their spot, and the queue is open again.", rows, {p.id})
+        await self.refresh_lobby_message(session, lobby)
+        channel = await self._queue_channel(lobby)
+        if channel is not None:
+            await channel.send(f"**{p.discord_username} {verb} the ready check.** Lobby #{lobby.id} is back to "
+                               f"{len(lobby.players)}/{lobby.max_players}. Press **Join** to take the spot.")
+
+    @tasks.loop(seconds=5)
+    async def ready_check_timeouts(self):
+        try:
+            async with SessionLocal() as session:
+                for lobby in await ready_check.due(session):
+                    rows = await ready_check.rows(session, lobby)
+                    removed = await ready_check.expire(session, lobby)
+                    if removed is None:
+                        continue                    # an Accept or Decline finished it just now
+                    if not removed:                 # the last Accept landed right at the deadline
+                        await self.everyone_in(session, lobby, rows)
+                        continue
+                    names = ", ".join(_who(p) for p in removed)
+                    mins = config.READY_CHECK_COOLDOWN_MINUTES
+                    wait = f" They can queue again in {mins} minutes." if mins > 0 else ""
+                    await self.close_ready_message(
+                        session, lobby, "expired",
+                        f"Didn't accept in time, so removed: {names}.{wait} Everyone who accepted keeps "
+                        f"their spot.", rows, {p.id for p in removed})
+                    await self.refresh_lobby_message(session, lobby)
+                    channel = await self._queue_channel(lobby)
+                    if channel is not None:
+                        await channel.send(
+                            f"**Ready check timed out.** {len(removed)} player(s) didn't accept and were removed. "
+                            f"Lobby #{lobby.id} is back to {len(lobby.players)}/{lobby.max_players}. "
+                            f"Press **Join** to take a spot.")
+        except Exception:
+            log.exception("ready check timeouts failed")
+
+    @ready_check_timeouts.before_loop
+    async def _before_ready_checks(self):
+        await self.bot.wait_until_ready()
 
     async def start_captain_space(self, session, lobby, cap1, cap2, public, header: str = "Captain draft!"):
         """Captain draft begins: it happens in the private thread if there is one."""
@@ -532,9 +756,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
             await inter.response.send_message(
                 f"{inter.user.mention} added {player.mention} to the queue ({n}/{lobby.max_players}).")
             await self.refresh_lobby_message(session, lobby)
-            if n >= lobby.max_players:
-                await inter.followup.send(f"**Lobby #{lobby.id} is full!** <@{lobby.host_discord_id}> "
-                                          f"press **Start** or run `/inhouse start`.")
+            await self.after_join(session, lobby)
 
     @inhouse.command(name="forceremove", description="Host/admin: take a player out of the queue.")
     @app_commands.describe(player="Who to remove")

@@ -25,7 +25,7 @@ When a lobby is open, press the green **Join** button.
 Changed your mind? Press **Leave** or run `/dequeue`.
 
 **3. Get your pick**
-At 10 players the host starts it. The bot makes fair teams and gives you a **pick position, 1 to 5**.
+At 10 players everyone is pinged with **Accept** and **Decline** buttons, and the message shows who has accepted as it happens. Decline, leave, or don't answer in time and you're out of the lobby and can't queue for 3 minutes; everyone else keeps their spot. Once all 10 accept, the bot makes fair teams and gives you a **pick position, 1 to 5**.
 **There is no role queue.** In champ select, Pick 1 calls their role first, then Pick 2, and so on. Line up in the custom lobby in pick order.
 Picks rotate: a late pick now means an early pick soon.
 
@@ -121,8 +121,11 @@ practice, or teaching a newcomer. Hosts open one with `/inhouse create casual:Tr
 
 1. In the queue channel, run `/inhouse create`. It uses your default mode.
    Add `casual:True` if tonight shouldn't count.
-2. Wait for 10. The bot pings you when the lobby fills.
-3. Press **Start**. The bot opens a private thread under the queue channel, named after you
+2. Wait for 10. When the lobby fills, the bot pings all ten players to **Accept**. The
+   message updates live as people accept. Anyone who declines or doesn't answer in time
+   (90 seconds) is removed with a 3-minute queue timeout, and the queue reopens for their
+   spot. Someone AFK? `/inhouse forceremove` them; that calls off the check without a timeout.
+3. When all ten accept, the lobby starts by itself. The bot opens a private thread under the queue channel, named after you
    (e.g. "Dan's inhouse"), for the ten players and staff. It has the teams, pick positions,
    the tournament code (or lobby name and password, and who creates the lobby). Each team
    also gets its own voice channel, and players already in voice are moved in. The thread

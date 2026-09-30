@@ -28,7 +28,7 @@ from bot import config
 from bot.models.lobby import Lobby, LobbyPlayer
 from bot.models.player import Player
 from bot.models.rating import PlayerRating
-from bot.services import bans
+from bot.services import bans, ready_check
 from bot.services.rating_engine import ROLES, normalize_role, ROLE_DISPLAY
 
 log = logging.getLogger("ranked-bot.lobby")
@@ -68,6 +68,7 @@ async def cancel_lobby(session: AsyncSession, lobby: Lobby, requestor_discord_id
     if lobby.host_discord_id != requestor_discord_id and not is_admin:
         raise LobbyError("Only the host (or an admin) can cancel the lobby.")
     lobby.status = "cancelled"
+    lobby.ready_deadline = None
     await session.commit()
     return lobby
 
@@ -92,7 +93,8 @@ async def active_lobbies(session: AsyncSession) -> list[Lobby]:
 # ------------------------------------------------------------------ #
 
 async def queue_player(session: AsyncSession, lobby: Lobby, discord_id: str,
-                       preferred_role: str | None = None, secondary_role: str | None = None) -> LobbyPlayer:
+                       preferred_role: str | None = None, secondary_role: str | None = None,
+                       ignore_cooldown: bool = False) -> LobbyPlayer:
     if lobby.status != "waiting":
         raise LobbyError("The lobby is no longer accepting players.")
     banned = await bans.active_ban(session, lobby.guild_id, discord_id)
@@ -103,8 +105,12 @@ async def queue_player(session: AsyncSession, lobby: Lobby, discord_id: str,
         raise LobbyError("You need to link your Riot account first: `/link GameName#TAG`.")
     if any(lp.player_id == p.id for lp in lobby.players):
         raise LobbyError("You are already in the queue.")
+    until = None if ignore_cooldown else ready_check.cooldown_left(p)
+    if until is not None:
+        raise LobbyError(ready_check.cooldown_message(until))
     if len(lobby.players) >= lobby.max_players:
-        raise LobbyError("The lobby is full.")
+        raise LobbyError("The lobby is full." + (" Everyone in it is being asked to accept right now."
+                                                 if ready_check.running(lobby) else ""))
     if lobby.mode == "pick_order":
         # No role queue: roles are claimed in champ select by pick position.
         preferred_role = secondary_role = None
@@ -121,6 +127,8 @@ async def queue_player(session: AsyncSession, lobby: Lobby, discord_id: str,
 async def dequeue_player(session: AsyncSession, lobby: Lobby, discord_id: str) -> None:
     if lobby.status != "waiting":
         raise LobbyError("Teams are already being made; ask the host to cancel if needed.")
+    if ready_check.running(lobby):
+        raise LobbyError("A ready check is running. Press **Decline** on it to leave.")
     p = await session.scalar(select(Player).where(Player.discord_id == discord_id))
     lp = next((x for x in lobby.players if p and x.player_id == p.id), None)
     if lp is None:
@@ -153,7 +161,9 @@ async def force_queue(session: AsyncSession, lobby: Lobby, requester_discord_id:
         raise LobbyError(f"{target.discord_username} is already in the queue.")
     if len(lobby.players) >= lobby.max_players:
         raise LobbyError("The lobby is full.")
-    return await queue_player(session, lobby, target_discord_id, preferred_role, secondary_role)
+    # The host's call overrides a ready-check cooldown.
+    return await queue_player(session, lobby, target_discord_id, preferred_role, secondary_role,
+                              ignore_cooldown=True)
 
 
 async def force_remove(session: AsyncSession, lobby: Lobby, requester_discord_id: str, target_discord_id: str,
@@ -166,6 +176,7 @@ async def force_remove(session: AsyncSession, lobby: Lobby, requester_discord_id
     lp = next((x for x in lobby.players if target and x.player_id == target.id), None)
     if lp is None:
         raise LobbyError("That player is not in this lobby.")
+    lobby.ready_deadline = None           # the lobby isn't full any more; no cooldown for them
     await session.delete(lp)
     await session.commit()
     await session.refresh(lobby)
@@ -191,6 +202,7 @@ async def remove_banned_player(session: AsyncSession, guild_id: str,
         if lobby.status == "waiting":
             lp = next((x for x in lobby.players if x.player_id == p.id), None)
             if lp is not None:
+                lobby.ready_deadline = None
                 await session.delete(lp)
                 await session.commit()
                 await session.refresh(lobby)
@@ -268,6 +280,9 @@ async def test_clear(session: AsyncSession) -> tuple[int, int]:
         .where(LobbyPlayer.player_id.in_(ids), Lobby.status.in_(("drafting", "active"))))).scalars().unique().all()
     for lobby in touched:
         lobby.status = "cancelled"
+    await session.execute(update(Lobby).where(
+        Lobby.status == "waiting", Lobby.ready_deadline.is_not(None),
+        Lobby.id.in_(select(LobbyPlayer.lobby_id).where(LobbyPlayer.player_id.in_(ids)))).values(ready_deadline=None))
     await session.execute(update(Lobby).where(Lobby.captain1_id.in_(ids)).values(captain1_id=None))
     await session.execute(update(Lobby).where(Lobby.captain2_id.in_(ids)).values(captain2_id=None))
     await session.execute(delete(LobbyPlayer).where(LobbyPlayer.player_id.in_(ids)))

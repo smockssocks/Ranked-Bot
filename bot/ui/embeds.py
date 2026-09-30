@@ -35,7 +35,8 @@ def lobby_embed(lobby: Lobby, names: dict[int, str], host_mention: str) -> disco
     e = discord.Embed(title=f"Inhouse Lobby #{lobby.id}", color=color)
     e.add_field(name="Mode", value=f"{MODE_NAMES.get(lobby.mode, lobby.mode)} • {kind}", inline=True)
     e.add_field(name="Players", value=f"{n}/{lobby.max_players}", inline=True)
-    e.add_field(name="Status", value=lobby.status, inline=True)
+    ready = lobby.status == "waiting" and getattr(lobby, "ready_deadline", None) is not None
+    e.add_field(name="Status", value="ready check" if ready else lobby.status, inline=True)
     if lobby.players:
         lines = []
         for i, lp in enumerate(sorted(lobby.players, key=lambda x: (x.joined_at is None, (x.joined_at.replace(tzinfo=timezone.utc) if x.joined_at and not x.joined_at.tzinfo else x.joined_at) or datetime.min.replace(tzinfo=timezone.utc))), 1):
@@ -49,6 +50,46 @@ def lobby_embed(lobby: Lobby, names: dict[int, str], host_mention: str) -> disco
     # Mentions only render in descriptions and field values, never in footers or titles.
     e.add_field(name="Host", value=host_mention, inline=False)
     e.set_footer(text="Press Join, or use /queue")
+    return e
+
+
+READY_TITLES = {
+    None: ("Match found! Accept or decline", discord.Color.gold()),
+    "accepted": ("Everyone accepted!", discord.Color.green()),
+    "declined": ("Ready check failed", discord.Color.red()),
+    "expired": ("Ready check timed out", discord.Color.red()),
+    "cancelled": ("Ready check called off", discord.Color.dark_grey()),
+}
+
+
+def ready_embed(lobby: Lobby, rows: list, outcome: str | None = None, note: str = "",
+                out_ids: set[int] = frozenset()) -> discord.Embed:
+    """
+    The ready check, updated live as people accept. `rows` are ready_check.Row(player, accepted);
+    `out_ids` are players who declined or timed out, shown with a cross.
+    """
+    from bot.services import ready_check
+    title, color = READY_TITLES[outcome]
+    done, total = sum(r.accepted for r in rows), len(rows)
+    bar = "🟩" * done + "⬛" * (total - done)
+    if outcome is None:
+        mins = config.READY_CHECK_COOLDOWN_MINUTES
+        penalty = f" Decline, leave or miss it and you can't queue for {mins} minutes." if mins > 0 else ""
+        desc = (f"{bar}\n**{done}/{total} accepted.** Time runs out "
+                f"<t:{ready_check.unix(lobby.ready_deadline)}:R>.{penalty}")
+    else:
+        desc = f"{bar}\n**{done}/{total} accepted.**" + (f"\n{note}" if note else "")
+    e = discord.Embed(title=f"{title} (Lobby #{lobby.id})", description=desc, color=color)
+    lines = []
+    for r in rows:
+        # A mention in a field value shows the name and never pings.
+        who = f"**{r.player.discord_username}**" if r.player.is_test else f"<@{r.player.discord_id}>"
+        mark = "❌" if r.player.id in out_ids else ("✅" if r.accepted else "⏳")
+        lines.append(f"{mark} {who}")
+    half = (len(lines) + 1) // 2
+    e.add_field(name="Players", value="\n".join(lines[:half]) or "—", inline=True)
+    if lines[half:]:
+        e.add_field(name="\u200b", value="\n".join(lines[half:]), inline=True)
     return e
 
 

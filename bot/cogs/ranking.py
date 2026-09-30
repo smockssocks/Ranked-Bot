@@ -204,7 +204,8 @@ class RankingCog(commands.Cog, name="Ranking"):
             inline=False)
         e.add_field(
             name="3. Get your pick",
-            value=("At 10 players the host starts it. The bot makes fair teams, gives you a "
+            value=("At 10 players everyone is pinged to press **Accept**. Decline or miss it and you're "
+                   "out, with a short queue timeout. Once all 10 accept, the bot makes fair teams, gives you a "
                    "**pick position, 1 to 5**, and opens a **private thread for your game** with how to get "
                    "into the game and the draft, plus a voice channel for each team. There is no role queue: in champ select, Pick 1 calls "
                    "their role first, then Pick 2, and so on. Line up in the custom lobby in pick order.\n"
