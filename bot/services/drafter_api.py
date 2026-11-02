@@ -4,8 +4,13 @@ drafter.lol API client (https://drafter.lol/api-docs).
 Auth:   Authorization: Bearer <DRAFTER_API_KEY>   (keys require a drafter.lol subscription)
 Create: POST {DRAFTER_API_BASE}{DRAFTER_SERIES_PATH}
         {team1Name, team2Name, fearless, ironman, firstSelection?, gameAmount (1-5), disabledChampions?}
-Read:   GET  {DRAFTER_API_BASE}{DRAFTER_SERIES_PATH}/{id}
-        -> series with a `drafts` array that only contains COMPLETED drafts.
+        -> {id, url}
+Read:   GET  {DRAFTER_API_BASE}{DRAFTER_DRAFT_PATH}/{id}
+        -> {draftData: {type: "series", drafts: [...]}} where `drafts` only contains COMPLETED drafts,
+           or {draftData: {type: "draft", ...}} for a single draft. 404 until a draft is completed.
+        Picks and bans are flat keys: bluePick1..5, redPick1..5, blueBan1..5, redBan1..5.
+Test:   key DRAFTER-KEY123 with DRAFTER_SERIES_PATH=/api/test/series and
+        DRAFTER_DRAFT_PATH=/api/test/draft-data (no subscription needed).
 
 The response schema is parsed defensively (links are discovered by key name and by
 URL shape) so a field rename on their side degrades gracefully instead of crashing.
@@ -135,6 +140,11 @@ def _side(d: dict[str, Any], side: str, what: str) -> list[str]:
     for c in candidates:
         if c in d:
             return _names(d[c])
+    # drafter.lol's own layout: bluePick1..bluePick5, redBan1..redBan5
+    numbered = f"{side}{what.rstrip('s').capitalize()}"
+    flat = [d[f"{numbered}{n}"] for n in range(1, 6) if d.get(f"{numbered}{n}")]
+    if flat:
+        return _names(flat)
     for k in (side, f"{side}Team", f"{side}_team", "team1" if side == "blue" else "team2"):
         inner = d.get(k)
         if isinstance(inner, dict):
@@ -150,6 +160,10 @@ def _side(d: dict[str, Any], side: str, what: str) -> list[str]:
 
 
 def parse_completed_drafts(raw: dict[str, Any]) -> list[DraftResult]:
+    if isinstance(raw.get("draftData"), dict):
+        raw = raw["draftData"]
+        if raw.get("type") == "draft":
+            raw = {"drafts": [raw]}
     drafts = raw.get("drafts")
     if drafts is None and isinstance(raw.get("series"), dict):
         drafts = raw["series"].get("drafts")
@@ -224,7 +238,7 @@ class DrafterClient:
         return DraftSeries(series_id=sid, links=links, raw=raw)
 
     async def get_series(self, series_id: str) -> dict[str, Any]:
-        url = f"{config.DRAFTER_API_BASE.rstrip('/')}{config.DRAFTER_SERIES_PATH}/{series_id}"
+        url = f"{config.DRAFTER_API_BASE.rstrip('/')}{config.DRAFTER_DRAFT_PATH.rstrip('/')}/{series_id}"
         async with self._session.get(url, headers=self._headers()) as resp:
             if resp.status != 200:
                 raise DrafterError(f"drafter.lol {resp.status}: {(await resp.text())[:300]}")

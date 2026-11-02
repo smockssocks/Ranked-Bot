@@ -1,4 +1,4 @@
-"""
+r"""
 Checks everything the bot needs BEFORE it tries to start, and explains in plain
 language how to fix whatever is missing. Run by start.bat; you can also run it
 yourself:  .venv\Scripts\python.exe tools\preflight.py

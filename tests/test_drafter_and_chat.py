@@ -32,6 +32,33 @@ def test_parse_completed_drafts_variants():
     assert da.parse_completed_drafts({}) == []
 
 
+def _flat_draft(**names):
+    d = {"blueName": "T1", "redName": "GenG", "firstPick": "blue"}
+    for side in ("blue", "red"):
+        for what in ("Pick", "Ban"):
+            for n in range(1, 6):
+                d[f"{side}{what}{n}"] = f"{side}{what}{n}"
+    d.update(names)
+    return d
+
+
+def test_parse_drafter_lol_responses():
+    # Shapes copied from https://api.drafter.lol/api/test/draft-data/{test-series-id,test-draft-id}
+    series = {"draftData": {"type": "series", "id": "s1", "gameAmount": 3,
+                            "drafts": [_flat_draft(gameNumber=1, bluePick1="Renekton", redBan5="Ashe"),
+                                       _flat_draft(gameNumber=2)]}}
+    out = da.parse_completed_drafts(series)
+    assert [d.game_number for d in out] == [1, 2]
+    assert out[0].blue_picks == ["Renekton", "bluePick2", "bluePick3", "bluePick4", "bluePick5"]
+    assert out[0].red_bans[-1] == "Ashe" and len(out[0].red_picks) == 5 and len(out[0].blue_bans) == 5
+    single = {"draftData": {"type": "draft", "id": "d1", **_flat_draft(redPick1="Ornn")}}
+    out = da.parse_completed_drafts(single)
+    assert len(out) == 1 and out[0].red_picks[0] == "Ornn"
+    created = {"id": "series_123abc", "url": "https://drafter.lol/draft/series_123abc"}
+    assert da.extract_series_id(created) == "series_123abc"
+    assert da.extract_links(created) == {"draft": "https://drafter.lol/draft/series_123abc"}
+
+
 def _t(content, **kw):
     base = dict(content=content, mentions_bot=False, is_reply_to_bot=False, is_dm=False, channel_id=1, author_id=7,
                 bot_name="Ranked Bot", last_interaction=None, now=time.time())

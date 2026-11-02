@@ -111,7 +111,7 @@ BACKUP_KEEP = _int("BACKUP_KEEP", 14)   # database copies kept in the backups fo
 DRAFTER_API_KEY = os.getenv("DRAFTER_API_KEY", "")
 DRAFTER_API_BASE = os.getenv("DRAFTER_API_BASE", "https://api.drafter.lol")
 DRAFTER_SERIES_PATH = os.getenv("DRAFTER_SERIES_PATH", "/api/series")
-DRAFTER_DRAFT_PATH = os.getenv("DRAFTER_DRAFT_PATH", "/api/draft")
+DRAFTER_DRAFT_PATH = os.getenv("DRAFTER_DRAFT_PATH", "/api/drafts")
 DRAFTER_POLL_SECS = _int("DRAFTER_POLL_SECS", 20)
 DRAFTER_FEARLESS = _bool("DRAFTER_FEARLESS", False)
 
