@@ -9,8 +9,7 @@ from discord.ext import commands, tasks
 
 from bot import config
 from bot.db.database import SessionLocal, init_db
-from bot.services import auto_detect, drafter_api, lobby_manager, settings
-from bot.ui import embeds
+from bot.services import auto_detect, drafter_api, lobby_manager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("ranked-bot")
@@ -97,41 +96,14 @@ class RankedBot(commands.Bot):
         except Exception:
             log.exception("auto-detect pass failed")
             return
-        for lobby, result in processed:
-            await self._announce_result(lobby, result)
-
-    async def _announce_result(self, lobby, result):
-        embed = embeds.results_embed(result)
-        targets = {int(lobby.channel_id)}
-        async with SessionLocal() as session:
-            extra = await settings.results_channel_id(session, lobby.guild_id)
-        if extra:
-            targets.add(extra)
-        for cid in targets:
-            ch = self.get_channel(cid)
-            if ch is None:
-                try:
-                    ch = await self.fetch_channel(cid)
-                except discord.HTTPException:
-                    continue
-            try:
-                await ch.send(f"Game detected for lobby #{lobby.id}!", embed=embed)
-            except discord.HTTPException as e:
-                log.warning("could not announce result: %s", e)
         lobby_cog = self.get_cog("Lobby")
-        if lobby_cog:
-            async with SessionLocal() as session:
-                fresh = await session.get(type(lobby), lobby.id)
-                if fresh:
-                    await lobby_cog.refresh_lobby_message(session, fresh)
-                    from bot.cogs.lobby import cleanup_note
-                    await lobby_cog.post_to_game(fresh, f"**Game recorded.** {cleanup_note()}", [embed])
-        mod = self.get_cog("Moderation")
-        if mod and result.smurf_flags:
-            await mod.post_flags(lobby.guild_id, result.smurf_flags)
-        ranking = self.get_cog("Ranking")
-        if ranking:
-            await ranking.refresh_board(lobby.guild_id)
+        if lobby_cog is None:
+            return
+        for lobby, result in processed:
+            if result is None:
+                await lobby_cog.post_checkin(lobby.id)      # players confirm roles first
+            else:
+                await lobby_cog.announce_result(lobby, result)
 
     @auto_detect_loop.before_loop
     async def _before_auto(self):

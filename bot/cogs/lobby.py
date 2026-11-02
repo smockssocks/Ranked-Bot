@@ -11,7 +11,9 @@ from sqlalchemy import select
 from bot import config
 from bot.db.database import SessionLocal
 from bot.models.player import Player
-from bot.services import drafter_api, game_channel, ladder, lobby_manager, ready_check, settings
+from types import SimpleNamespace
+
+from bot.services import checkin, drafter_api, game_channel, ladder, lobby_manager, ready_check, settings
 from bot.services.lobby_manager import LobbyError
 from bot.services.rating_engine import ROLES, ROLE_DISPLAY
 from bot.ui import embeds
@@ -61,6 +63,11 @@ async def _resolve_player(session, lobby, value: str, allowed: set[int]) -> int 
         if names.get(pid, "").lower() == value.lstrip("@").lower():
             return pid
     return None
+
+
+async def _is_staff(inter: discord.Interaction) -> bool:
+    from bot.cogs.panel import is_staff
+    return await is_staff(inter)
 
 
 def _is_admin(inter: discord.Interaction) -> bool:
@@ -150,6 +157,94 @@ class RoleView(discord.ui.View):
         return callback
 
 
+class TeamRolesView(discord.ui.View):
+    """Under the teams post in the game thread: captains (or the host or staff) set roles. Persistent."""
+
+    def __init__(self, cog: "LobbyCog"):
+        super().__init__(timeout=None)
+        self.cog = cog
+        for team, label in ((1, "Set Blue roles"), (2, "Set Red roles")):
+            b = discord.ui.Button(label=label, emoji="🔵" if team == 1 else "🔴", custom_id=f"roles:{team}",
+                                  style=discord.ButtonStyle.secondary)
+            b.callback = self._make(team)
+            self.add_item(b)
+
+    def _make(self, team: int):
+        async def callback(inter: discord.Interaction):
+            await self.cog.handle_roles_open(inter, team)
+        return callback
+
+
+class RoleEditView(discord.ui.View):
+    """Private: one dropdown per teammate. Choosing a taken role swaps the two players."""
+
+    def __init__(self, cog: "LobbyCog", lobby_id: int, team: int, members: list[tuple[str, str, str | None]],
+                 teams_message=None):
+        super().__init__(timeout=600)
+        self.cog, self.lobby_id, self.team, self.teams_message = cog, lobby_id, team, teams_message
+        for discord_id, name, role in members[:5]:
+            sel = discord.ui.Select(
+                placeholder=f"{name}: {ROLE_DISPLAY.get(role or '', 'no role')}"[:150],
+                options=[discord.SelectOption(label=f"{name[:60]}: {ROLE_DISPLAY[r]}", value=r, default=(r == role))
+                         for r in ROLES])
+            sel.callback = self._make(discord_id, sel)
+            self.add_item(sel)
+
+    def _make(self, discord_id: str, sel: discord.ui.Select):
+        async def callback(inter: discord.Interaction):
+            await self.cog.handle_role_set(inter, self, discord_id, sel.values[0])
+        return callback
+
+
+class CheckinView(discord.ui.View):
+    """On the post-game check-in. Persistent."""
+
+    def __init__(self, cog: "LobbyCog"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Confirm my role & champion", emoji="✅", style=discord.ButtonStyle.success,
+                       custom_id="checkin:open")
+    async def open(self, inter: discord.Interaction, _b: discord.ui.Button):
+        await self.cog.handle_checkin_open(inter)
+
+    @discord.ui.button(label="Finish now", style=discord.ButtonStyle.secondary, custom_id="checkin:finish")
+    async def finish(self, inter: discord.Interaction, _b: discord.ui.Button):
+        await self.cog.handle_checkin_finish(inter)
+
+
+class CheckinForm(discord.ui.View):
+    """Private: the role you played, which champion was yours, then Confirm."""
+
+    def __init__(self, cog: "LobbyCog", lobby_id: int, message_id: int, role: str | None, champion: str | None,
+                 champions: list[str]):
+        super().__init__(timeout=600)
+        self.cog, self.lobby_id, self.message_id = cog, lobby_id, message_id
+        self.role, self.champion = role, champion
+        role_sel = discord.ui.Select(placeholder="The role you played", row=0, options=[
+            discord.SelectOption(label=ROLE_DISPLAY[r], value=r, default=(r == role)) for r in ROLES])
+        champ_sel = discord.ui.Select(placeholder="Your champion", row=1, options=[
+            discord.SelectOption(label=c[:100], value=c[:100], default=(c == champion)) for c in champions[:25]]
+            or [discord.SelectOption(label="(unknown)", value="?")])
+
+        async def on_role(inter: discord.Interaction):
+            self.role = role_sel.values[0]
+            await inter.response.defer()
+
+        async def on_champ(inter: discord.Interaction):
+            self.champion = champ_sel.values[0]
+            await inter.response.defer()
+        role_sel.callback, champ_sel.callback = on_role, on_champ
+        self.add_item(role_sel)
+        self.add_item(champ_sel)
+        ok = discord.ui.Button(label="Confirm", style=discord.ButtonStyle.success, row=2)
+
+        async def on_ok(inter: discord.Interaction):
+            await self.cog.handle_checkin_submit(inter, self)
+        ok.callback = on_ok
+        self.add_item(ok)
+
+
 def roles_line(pref: str | None, sec: str | None) -> str:
     return embeds._roles_text(pref, sec)
 
@@ -162,11 +257,15 @@ class LobbyCog(commands.Cog, name="Lobby"):
         self.bot.add_view(LobbyView(self))
         self.bot.add_view(ReadyView(self))
         self.bot.add_view(DraftView(self))
+        self.bot.add_view(TeamRolesView(self))
+        self.bot.add_view(CheckinView(self))
+        self.checkin_timeouts.start()          # always: a check-in already open must still close
         if config.READY_CHECK_ENABLED:
             self.ready_check_timeouts.start()
 
     async def cog_unload(self):
         self.ready_check_timeouts.cancel()
+        self.checkin_timeouts.cancel()
 
     async def _wrong_channel(self, inter: discord.Interaction) -> bool:
         """
@@ -193,9 +292,17 @@ class LobbyCog(commands.Cog, name="Lobby"):
     # ------------------------------------------------------------------ #
 
     async def _lobby_here(self, session, inter: discord.Interaction):
-        """In a game's private thread, that game's lobby; anywhere else, the server's open lobby."""
-        here = await game_channel.lobby_for_channel(session, str(inter.guild_id), inter.channel_id)
-        return here or await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+        """
+        In a game's private thread, that game's lobby. Anywhere else, the lobby filling in this
+        channel, then any lobby filling in the server, then the newest game in progress.
+        """
+        gid = str(inter.guild_id)
+        here = await game_channel.lobby_for_channel(session, gid, inter.channel_id)
+        if here is not None:
+            return here
+        return (await lobby_manager.get_open_lobby(session, gid, str(inter.channel_id))
+                or await lobby_manager.get_open_lobby(session, gid)
+                or await lobby_manager.get_active_lobby(session, gid))
 
     async def _game_channel(self, lobby):
         """The lobby's private thread, if it has one."""
@@ -226,17 +333,20 @@ class LobbyCog(commands.Cog, name="Lobby"):
             log.warning("could not create team voice for lobby %s: %s", lobby.id, e)
             return None
 
-    async def post_to_game(self, lobby, content: str | None = None, embeds_: list | None = None) -> bool:
+    async def post_to_game(self, lobby, content: str | None = None, embeds_: list | None = None,
+                           view: discord.ui.View | None = None):
+        """Post in the lobby's thread. Returns the message, or None (falsy) if there's no thread."""
         ch = await self._game_channel(lobby)
         if ch is None:
-            return False
+            return None
         try:
-            await ch.send(content=content, embeds=embeds_ or [],
-                          allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
-            return True
+            kw = {"view": view} if view is not None else {}
+            return await ch.send(content=content, embeds=embeds_ or [],
+                                 allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                                 **kw)
         except discord.HTTPException as e:
             log.warning("could not post in game thread %s: %s", lobby.game_channel_id, e)
-            return False
+            return None
 
     async def _mentions(self, session, lobby) -> str:
         out = []
@@ -350,9 +460,9 @@ class LobbyCog(commands.Cog, name="Lobby"):
         await self.start_lobby(session, lobby, public, random_captains)
         return None
 
-    async def open_lobby(self, session, guild_id: str, channel, host, casual: bool = False):
-        """Open a lobby in `channel` with `host` as its host (used by the mod panel)."""
-        mode, err = settings.resolve_mode(None, await settings.allowed_modes(session, guild_id),
+    async def open_lobby(self, session, guild_id: str, channel, host, casual: bool = False, mode: str | None = None):
+        """Open a lobby in `channel` with `host` as its host (the mod panel, and the next lobby)."""
+        mode, err = settings.resolve_mode(mode, await settings.allowed_modes(session, guild_id),
                                           await settings.default_mode(session, guild_id))
         if err:
             raise LobbyError(err)
@@ -366,36 +476,291 @@ class LobbyCog(commands.Cog, name="Lobby"):
         return lobby
 
     async def record_game(self, session, guild_id: str, raw_id: str, by: str, lobby=None):
-        """Record a finished game by its ID. Returns (result, None) or (None, error text)."""
+        """
+        Record a finished game by its ID. Works out which game in progress it belongs to from
+        who played in it. A lobby's game goes to the post-game check-in first.
+        Returns (result, None), (None, None) when the check-in started, or (None, error text).
+        """
+        from bot.services.auto_detect import match_belongs_to_lobby
         from bot.services.game_processor import process_match
-        from bot.services.riot_api import RiotAPIError, RiotUnavailable, friendly_error, normalize_match_id
+        from bot.services import metrics as metrics_svc
+        from bot.services.riot_api import RiotAPIError, RiotClient, RiotUnavailable, friendly_error, normalize_match_id
         try:
             mid = normalize_match_id(raw_id)
         except ValueError as e:
             return None, str(e)
-        if lobby is None:
-            lobby = await session.scalar(select(lobby_manager.Lobby).where(
-                lobby_manager.Lobby.guild_id == guild_id, lobby_manager.Lobby.status == "active")
-                .order_by(lobby_manager.Lobby.id.desc()))
-        in_lobby = lobby is not None and lobby.status == "active"
+        waiting = await session.scalar(select(lobby_manager.Lobby).where(
+            lobby_manager.Lobby.result_match_id == mid, lobby_manager.Lobby.status == "confirming"))
+        if waiting is not None:
+            return None, (f"That's lobby #{waiting.id}'s game, and its players are confirming roles right now. "
+                          f"It's scored when they're done, or press **Finish now** on the check-in.")
         try:
-            result = await process_match(session, mid, submitted_by=by, lobby_id=lobby.id if in_lobby else None,
-                                         ranked=lobby.ranked if in_lobby else True)
-        except ValueError as e:
-            return None, str(e)
+            async with RiotClient() as riot:
+                match = await riot.get_match(mid)
+                try:
+                    timeline = await riot.get_match_timeline(mid)
+                except RiotAPIError:
+                    timeline = {"info": {"frames": []}}
         except (RiotAPIError, RiotUnavailable) as e:
             return None, friendly_error(e, context="match", match_id=mid)
-        if in_lobby and not result.remake:
+        if lobby is None or lobby.status != "active":
+            lobby = None
+            for cand in await lobby_manager.live_lobbies(session, guild_id):
+                if cand.status != "active":
+                    continue
+                puuids = set(await lobby_manager.lobby_puuids(session, cand))
+                if puuids and match_belongs_to_lobby(match, puuids, min(len(puuids), config.AUTO_DETECT_MIN_LOBBY_PLAYERS)):
+                    lobby = cand
+                    break
+        if lobby is not None and config.CHECKIN_ENABLED and not metrics_svc.is_remake(match, config.MIN_GAME_MINUTES):
+            try:
+                await checkin.begin(session, lobby, mid, match, timeline, submitted_by=by, auto_detected=False)
+            except checkin.CheckinError as e:
+                return None, str(e)
+            await self.post_checkin(lobby.id)
+            return None, None
+        try:
+            result = await process_match(session, mid, submitted_by=by, lobby_id=lobby.id if lobby else None,
+                                         ranked=lobby.ranked if lobby else True, match_data=match,
+                                         timeline_data=timeline)
+        except ValueError as e:
+            return None, str(e)
+        if lobby is not None:
             await lobby_manager.complete_lobby(session, lobby)
-            await self.refresh_lobby_message(session, lobby)
-            await self.post_to_game(lobby, f"**Game recorded.** {cleanup_note()}", [embeds.results_embed(result)])
+            await self.announce_result(lobby, result)
+        else:
+            await self._after_result(guild_id, result)
+        return result, None
+
+    async def _after_result(self, guild_id: str, result) -> None:
         mod = self.bot.get_cog("Moderation")
         if mod and result.smurf_flags:
             await mod.post_flags(guild_id, result.smurf_flags)
         ranking = self.bot.get_cog("Ranking")
         if ranking:
             await ranking.refresh_board(guild_id)
-        return result, None
+
+    async def announce_result(self, lobby, result):
+        """A lobby's game was scored: post it in the lobby's channel, results channel and thread."""
+        embed = embeds.results_embed(result)
+        async with SessionLocal() as session:
+            extra = await settings.results_channel_id(session, lobby.guild_id)
+            targets = {int(lobby.channel_id)} | ({extra} if extra else set())
+            for cid in targets:
+                ch = self.bot.get_channel(cid)
+                if ch is None:
+                    try:
+                        ch = await self.bot.fetch_channel(cid)
+                    except discord.HTTPException:
+                        continue
+                try:
+                    await ch.send(f"Result for lobby #{lobby.id}!", embed=embed)
+                except discord.HTTPException as e:
+                    log.warning("could not announce result: %s", e)
+            fresh = await session.get(type(lobby), lobby.id)
+            if fresh:
+                await self.refresh_lobby_message(session, fresh)
+                await self.post_to_game(fresh, f"**Game recorded.** {cleanup_note()}", [embed])
+        await self._after_result(lobby.guild_id, result)
+
+    # ------------------------------------------------------------------ #
+    # post-game check-in                                                   #
+    # ------------------------------------------------------------------ #
+
+    async def post_checkin(self, lobby_id: int):
+        """Ask the players to confirm role and champion, in the game thread (or the queue channel)."""
+        async with SessionLocal() as session:
+            lobby = await session.get(lobby_manager.Lobby, lobby_id)
+            if lobby is None or not checkin.running(lobby):
+                return
+            rows = await checkin.rows(session, lobby)
+            if all(r.player.is_test for r in rows):          # nobody to ask
+                await self.finish_checkin(session, lobby)
+                return
+            pings = " ".join(f"<@{r.player.discord_id}>" for r in rows if not r.player.is_test)
+            embed = embeds.checkin_embed(lobby, rows, duplicates=checkin.duplicate_roles(rows))
+            content = f"{pings}\n**Game found!** Confirm the role you played and your champion so LP is scored right."
+            msg = await self.post_to_game(lobby, content, [embed], view=CheckinView(self))
+            if not msg:
+                channel = await self._queue_channel(lobby)
+                try:
+                    msg = await channel.send(content, embed=embed, view=CheckinView(self),
+                                             allowed_mentions=MENTION_USERS) if channel else None
+                except discord.HTTPException as e:
+                    log.warning("could not post check-in for lobby %s: %s", lobby.id, e)
+                    msg = None
+            if not msg:
+                await self.finish_checkin(session, lobby)        # nowhere to ask: score with the guesses
+                return
+            lobby.checkin_message_id = str(msg.id)
+            await session.commit()
+
+    async def _checkin_channel(self, lobby):
+        return await self._game_channel(lobby) or await self._queue_channel(lobby)
+
+    async def update_checkin_message(self, session, lobby, done: bool = False, note: str = ""):
+        if not lobby.checkin_message_id:
+            return
+        rows = await checkin.rows(session, lobby)
+        embed = embeds.checkin_embed(lobby, rows, done, note, checkin.duplicate_roles(rows))
+        ch = await self._checkin_channel(lobby)
+        if ch is None:
+            return
+        try:
+            kw = {"view": None} if done else {}
+            await ch.get_partial_message(int(lobby.checkin_message_id)).edit(embed=embed, **kw)
+        except discord.HTTPException as e:
+            log.warning("could not update check-in for lobby %s: %s", lobby.id, e)
+
+    async def finish_checkin(self, session, lobby, by: str | None = None):
+        """Score the game with the confirmed roles. Exactly once, however many people trigger it."""
+        if not await checkin.end(session, lobby):
+            return
+        rows = await checkin.rows(session, lobby)
+        await self.update_checkin_message(session, lobby, done=True,
+                                          note=f"Closed by {by}. Scoring the game now." if by else "")
+        for r in checkin.mismatches(rows):
+            mod = self.bot.get_cog("Moderation")
+            if mod is not None:
+                said, played = r.lobby_player.confirmed_champion, r.guess_champion
+                detail = (f"but their linked account played **{played}**" if played else
+                          "but their linked account wasn't in the game at all")
+                await mod._mod_log(lobby.guild_id, f"🔎 Lobby #{lobby.id}: **{r.player.discord_username}** says they "
+                                                   f"played **{said}**, {detail}. They may have played on a "
+                                                   f"different account.")
+        try:
+            result = await checkin.finalize(session, lobby)
+        except (checkin.CheckinError, ValueError) as e:
+            log.warning("could not score lobby %s after check-in: %s", lobby.id, e)
+            await self.post_to_game(lobby, f"Couldn't score this game: {e}")
+            return
+        await self.announce_result(lobby, result)
+
+    async def handle_checkin_open(self, inter: discord.Interaction):
+        async with SessionLocal() as session:
+            lobby = await checkin.lobby_for_message(session, inter.message.id)
+            if lobby is None or not checkin.running(lobby):
+                await inter.response.send_message("This check-in is over.", ephemeral=True)
+                return
+            mine = next((r for r in await checkin.rows(session, lobby) if r.player.discord_id == str(inter.user.id)), None)
+            if mine is None:
+                await inter.response.send_message("Only the players in this game confirm here.", ephemeral=True)
+                return
+            champs = await checkin.team_champions(session, lobby, mine.team)
+        await inter.response.send_message(
+            "Which role did you play, and which champion was yours? Then press **Confirm**.",
+            view=CheckinForm(self, lobby.id, inter.message.id, mine.role, mine.champion, champs), ephemeral=True)
+
+    async def handle_checkin_submit(self, inter: discord.Interaction, form: CheckinForm):
+        if form.role is None:
+            await inter.response.send_message("Choose the role you played first.", ephemeral=True)
+            return
+        async with SessionLocal() as session:
+            lobby = await session.get(lobby_manager.Lobby, form.lobby_id)
+            try:
+                if lobby is None:
+                    raise checkin.CheckinError("That game is gone.")
+                await checkin.confirm(session, lobby, str(inter.user.id), form.role,
+                                      form.champion if form.champion not in (None, "?") else None)
+            except checkin.CheckinError as e:
+                await inter.response.edit_message(content=str(e), view=None)
+                return
+            await inter.response.edit_message(
+                content=f"Thanks! You played **{ROLE_DISPLAY[form.role]}**"
+                        + (f" as **{form.champion}**." if form.champion not in (None, "?") else "."), view=None)
+            if await checkin.everyone_confirmed(session, lobby):
+                await self.finish_checkin(session, lobby)
+            else:
+                await self.update_checkin_message(session, lobby)
+
+    async def handle_checkin_finish(self, inter: discord.Interaction):
+        async with SessionLocal() as session:
+            lobby = await checkin.lobby_for_message(session, inter.message.id)
+            if lobby is None or not checkin.running(lobby):
+                await inter.response.send_message("This check-in is over.", ephemeral=True)
+                return
+            staff = await _is_staff(inter)
+            if not staff and str(inter.user.id) != lobby.host_discord_id:
+                await inter.response.send_message("Only the host or a mod can finish the check-in early.",
+                                                  ephemeral=True)
+                return
+            await inter.response.send_message("Scoring the game now with what's been confirmed.", ephemeral=True)
+            await self.finish_checkin(session, lobby, by=inter.user.display_name)
+
+    @tasks.loop(seconds=15)
+    async def checkin_timeouts(self):
+        try:
+            async with SessionLocal() as session:
+                for lobby in await checkin.due(session):
+                    await self.finish_checkin(session, lobby)
+        except Exception:
+            log.exception("check-in timeouts failed")
+
+    @checkin_timeouts.before_loop
+    async def _before_checkins(self):
+        await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------ #
+    # roles after the draft                                                #
+    # ------------------------------------------------------------------ #
+
+    async def _team_members(self, session, lobby, team: int) -> list[tuple[str, str, str | None]]:
+        out = []
+        for lp in sorted(lobby.players, key=lambda x: (x.pick_order if x.pick_order is not None else -1, x.id)):
+            if lp.team != team:
+                continue
+            p = await session.get(Player, lp.player_id)
+            if p is not None:
+                out.append((p.discord_id, p.discord_username, lp.assigned_role))
+        return out
+
+    async def _may_set_roles(self, session, lobby, inter: discord.Interaction, team: int) -> bool:
+        if _is_admin(inter) or str(inter.user.id) == lobby.host_discord_id or await _is_staff(inter):
+            return True
+        cap = await session.get(Player, lobby.captain1_id if team == 1 else lobby.captain2_id) \
+            if (lobby.captain1_id and lobby.captain2_id) else None
+        return cap is not None and cap.discord_id == str(inter.user.id)
+
+    async def handle_roles_open(self, inter: discord.Interaction, team: int):
+        async with SessionLocal() as session:
+            lobby = await game_channel.lobby_for_channel(session, str(inter.guild_id), inter.channel_id)
+            if lobby is None or lobby.status != "active":
+                await inter.response.send_message("Roles can only be changed while the game is on.", ephemeral=True)
+                return
+            if lobby.mode == "pick_order":
+                await inter.response.send_message("Pick order lobbies don't have set roles.", ephemeral=True)
+                return
+            if not await self._may_set_roles(session, lobby, inter, team):
+                await inter.response.send_message("Only that team's captain, the host or a mod can set its roles.",
+                                                  ephemeral=True)
+                return
+            members = await self._team_members(session, lobby, team)
+        await inter.response.send_message(
+            f"{'🔵 Blue' if team == 1 else '🔴 Red'} roles. Choosing a role someone else has swaps the two of them.",
+            view=RoleEditView(self, lobby.id, team, members, inter.message), ephemeral=True)
+
+    async def handle_role_set(self, inter: discord.Interaction, view: RoleEditView, discord_id: str, role: str):
+        async with SessionLocal() as session:
+            lobby = await session.get(lobby_manager.Lobby, view.lobby_id)
+            try:
+                if lobby is None:
+                    raise LobbyError("That lobby is gone.")
+                if not await self._may_set_roles(session, lobby, inter, view.team):
+                    raise LobbyError("Only that team's captain, the host or a mod can set its roles.")
+                # The check above covers captains; set_role then only needs to know it's allowed.
+                await lobby_manager.set_role(session, lobby, lobby.host_discord_id, discord_id, role, is_admin=True)
+            except LobbyError as e:
+                await inter.response.edit_message(content=str(e), view=None)
+                return
+            members = await self._team_members(session, lobby, view.team)
+            names = await _names(session, lobby)
+            teams = embeds.teams_embed(lobby, names, await lobby_manager.lobby_ratings(session, lobby))
+        await inter.response.edit_message(view=RoleEditView(self, lobby.id, view.team, members, view.teams_message))
+        if view.teams_message is not None:
+            try:
+                await view.teams_message.edit(embeds=[teams] + list(view.teams_message.embeds[1:]))
+            except (discord.HTTPException, AttributeError):
+                pass
 
     async def start_lobby(self, session, lobby, public, random_captains: bool = False):
         """Make teams (or start the captain draft) and tell everyone. `public` is where to post."""
@@ -404,6 +769,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
             if lobby.mode == "captain":
                 cap1, cap2 = await lobby_manager.start_captain_draft(session, lobby, random_captains)
                 await self.refresh_lobby_message(session, lobby)
+                await self.open_next_lobby(session, lobby)
                 await self.start_captain_space(session, lobby, cap1, cap2, public)
                 return
             await lobby_manager.make_teams(session, lobby)
@@ -411,7 +777,33 @@ class LobbyCog(commands.Cog, name="Lobby"):
             await public.send(str(e))
             return
         await self.refresh_lobby_message(session, lobby)
+        await self.open_next_lobby(session, lobby)
         await self.announce_teams(session, lobby, names, public=public)
+
+    async def open_next_lobby(self, session, started):
+        """A lobby just left the queue: open the next one in the same channel so people keep queueing."""
+        if not config.AUTO_NEXT_LOBBY:
+            return None
+        if await lobby_manager.get_open_lobby(session, started.guild_id, started.channel_id):
+            return None
+        channel = await self._queue_channel(started)
+        if channel is None:
+            return None
+        host = SimpleNamespace(id=int(started.host_discord_id) if started.host_discord_id.isdigit() else 0,
+                               mention=f"<@{started.host_discord_id}>")
+        allowed = await settings.allowed_modes(session, started.guild_id)
+        try:
+            nxt = await self.open_lobby(session, started.guild_id, channel, host, casual=not started.ranked,
+                                        mode=started.mode if started.mode in allowed else None)
+        except (LobbyError, discord.HTTPException) as e:
+            log.warning("could not open the next lobby after #%s: %s", started.id, e)
+            return None
+        try:
+            await channel.send(f"**Lobby #{started.id} is underway.** Lobby #{nxt.id} is open: press **Join** "
+                               f"to queue for the next game.")
+        except discord.HTTPException:
+            pass
+        return nxt
 
     # ------------------------------------------------------------------ #
     # ready check                                                          #
@@ -744,8 +1136,12 @@ class LobbyCog(commands.Cog, name="Lobby"):
         if voice:
             extra += f"\nTeam voice: {voice[0].mention} and {voice[1].mention}. Only your own team can join."
         ch = await self.open_game_space(session, lobby)
+        roles_view = TeamRolesView(self) if lobby.mode != "pick_order" else None
+        if roles_view is not None:
+            extra += "\nCaptains: use **Set Blue roles** / **Set Red roles** below to move people between roles."
         if ch is not None and await self.post_to_game(
-                lobby, f"{await self._mentions(session, lobby)}\n{header}{note}{extra}", [teams, join]):
+                lobby, f"{await self._mentions(session, lobby)}\n{header}{note}{extra}", [teams, join],
+                view=roles_view):
             summary = f"{header}{note}\nPlayers: the lobby details are in {ch.mention}."
         else:
             missed = await self._dm_join_info(session, lobby, join)
@@ -1083,6 +1479,10 @@ class LobbyCog(commands.Cog, name="Lobby"):
             result, err = await self.record_game(session, str(inter.guild_id), match_id, inter.user.name, here)
         if err:
             await inter.followup.send(err)
+            return
+        if result is None:
+            await inter.followup.send("Found it. The players are confirming their roles and champions in the game "
+                                      "thread; LP is posted when they're done.")
             return
         await inter.followup.send(embed=embeds.results_embed(result))
 

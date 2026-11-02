@@ -150,10 +150,13 @@ Run the test suite any time with `pytest`. It needs no network, Discord or keys.
 5. If `DRAFTER_API_KEY` is set, the teams embed includes **blue / red / spectator** draft links.
    Captains draft on drafter.lol; the bot posts picks and bans when the draft completes. Create
    the custom lobby in the client as **Tournament Draft** and lock in the same champions.
-6. **Play the game.** Nothing else to do.
+6. **Play the game.**
 7. Within about two minutes of the game ending (`AUTO_DETECT_POLL_SECS`) the bot finds it in
-   the players' match history, processes it, posts a results embed (LP changes, performance
-   score, MVP) in the lobby channel, and closes the lobby. If it somehow misses it,
+   the players' match history and opens the **post-game check-in** in the game's thread: each
+   player confirms the role they played and their champion from two dropdowns. When everyone
+   has confirmed (or after `CHECKIN_MINUTES`, 5), the bot scores the game with those roles, posts
+   a results embed (LP changes, performance score, MVP), updates #leaderboard, and closes the
+   lobby. If it somehow misses it,
    `/inhouse submit 5650481942` does the same thing manually. Use the game ID from the
    post-game screen; the bot adds the region prefix itself.
 8. Players check `/rank`, `/history`, and `/explain` to see exactly why they gained or lost LP.
@@ -166,12 +169,18 @@ test custom will not show up, so test the pipeline with `/admin submit` on a pas
 ## 3. Features
 
 ### Lobbies
-- One lobby per channel, persistent buttons, state stored in the database so a restart mid-lobby
-  loses nothing.
+- **Several games at once.** One lobby fills in the queue channel at a time; as soon as it
+  starts, the next one opens there (`AUTO_NEXT_LOBBY`), so people keep queueing while games are
+  played. Each game has its own thread and voice channels, named after its captains ("Danman vs
+  Faker"). Nobody can be in two games at once. Buttons and state live in the database, so a
+  restart mid-game loses nothing.
 - **Captain draft** by default: captains are the top two on the leaderboard and pick from a
   dropdown. Pick order and balanced are available with `/admin modes`.
 - **Roles:** after pressing Join, players choose a main and second role (or Fill) from two
-  dropdowns. The choice is remembered for next time, and captains see it while drafting.
+  dropdowns. The choice is remembered for next time, and captains see it while drafting. After
+  the draft, **Set Blue roles** / **Set Red roles** on the teams post let a captain (or the host
+  or a mod) move people between roles with dropdowns; picking a taken role swaps the two.
+- **Post-game check-in:** see below.
 - **Casual lobbies** (`/inhouse create casual:True`) post results but never touch LP, the
   community role averages, or the anti-smurf checks.
 - **Ready check** when a lobby fills: Accept / Decline buttons that update live, a 3-minute
@@ -425,6 +434,26 @@ approve.** It keeps everything and only adds the new
 permissions. `/admin setup` tells you if any are missing. The queue channel stops players
 starting threads; the bot gives itself an exception there automatically.
 
+## Post-game check-in
+
+Riot often leaves the role blank in custom games, and the role decides who a player is compared
+against, so the bot asks. When a lobby's game is found, the game thread gets a check-in that
+pings the ten players:
+
+- **Confirm my role & champion** opens two private dropdowns: the role they played (pre-filled
+  with the bot's guess: Riot's role if Riot gave one, otherwise the role from the draft) and
+  which champion on their team was theirs. The check-in post shows ✅ / ⏳ for everyone, and
+  warns if a team has two players on the same role.
+- The game is scored when all ten have confirmed, when `CHECKIN_MINUTES` (5) run out (anyone who
+  didn't answer keeps the guess), or when the host or a mod presses **Finish now**.
+- **Confirmed roles are what gets scored**, and what `/rank`, the per-role ladders and
+  versatility use later. They're saved with the game, so an admin reprocess gives the same result.
+- **The champion is a check, not an input.** The bot already knows each linked account's
+  champion. If someone picks a different one, or their linked account wasn't in the game, the
+  mods get a note: they probably played on another account. It never changes whose game it was.
+- Remakes skip the check-in. Casual games go through it too, for the stats.
+- `CHECKIN_ENABLED=false` scores games straight away with Riot's roles, as before.
+
 ## Control panel, leaderboard channel and seasons
 
 **Control panel.** A pinned message in #bot-admin with buttons, so mods never have to type
@@ -433,7 +462,7 @@ Server, or the @Inhouse Mod role) can press them.
 
 | Row | Buttons |
 | --- | --- |
-| Lobby | **Open lobby**, **Open casual lobby** (in the queue channel, with you as host), **Start now**, **Cancel lobby** (asks first) |
+| Lobby | **Open lobby**, **Open casual lobby** (in the queue channel, with you as host), **Start now** (the filling lobby), **Cancel lobby** (asks which, when several games are running, then asks to confirm) |
 | Players | **Add player** (member picker), **Remove player** (no cooldown for them), **Set captains** (overrides the leaderboard) |
 | Games | **Submit game** (type the game ID), **Undo a game** (choose from the last 10, asks first) |
 | Moderation | **Queue ban** (member picker, then length and reason), **Lift ban**, **Smurf flags** (review and resolve) |

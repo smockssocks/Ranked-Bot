@@ -354,9 +354,10 @@ class RankingCog(commands.Cog, name="Ranking"):
                    "how to get in, and your team gets its own voice channel."),
             inline=False)
         e.add_field(
-            name="4. Play",
-            value=("Join the custom game and play it out. You do not report anything: the bot finds "
-                   "the game and posts everyone's LP within a couple of minutes."),
+            name="4. Play, then confirm",
+            value=("Join the custom game and play it out. You don't report the result: the bot finds the "
+                   "game, then asks everyone to confirm the role they played and their champion from two "
+                   "dropdowns, and posts LP. Roles matter: you're scored against others who played that role."),
             inline=False)
         e.add_field(
             name="Your rank",

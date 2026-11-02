@@ -130,6 +130,43 @@ def draft_embed(lobby: Lobby, names: dict[int, str], tags: dict[int, str],
     return e
 
 
+def checkin_embed(lobby: Lobby, rows: list, done: bool = False, note: str = "",
+                  duplicates: list | None = None) -> discord.Embed:
+    """The post-game check-in. rows = checkin.Row, in team order."""
+    from bot.services import checkin as ci
+    confirmed = sum(1 for r in rows if r.confirmed or r.player.is_test)
+    e = discord.Embed(title=f"Game over: confirm your role and champion (Lobby #{lobby.id})",
+                      color=discord.Color.green() if done else discord.Color.blurple())
+    if done:
+        e.title = f"Check-in closed (Lobby #{lobby.id})"
+        e.description = note or "Scoring the game now."
+    else:
+        mins = config.CHECKIN_MINUTES
+        e.description = (f"Press **Confirm my role & champion** and pick from the dropdowns. LP is posted when "
+                         f"everyone has confirmed, or <t:{int(ci._aware(lobby.checkin_deadline).timestamp())}:R> "
+                         f"at the latest ({mins} minutes). If you don't answer, the bot's guess is used.\n"
+                         f"**{confirmed}/{len(rows)} confirmed.**")
+    for team, label in ((1, "🔵 Blue"), (2, "🔴 Red")):
+        lines = []
+        for r in rows:
+            if r.team != team:
+                continue
+            mark = "✅" if r.confirmed else ("🤖" if r.player.is_test else "⏳")
+            who = f"**{r.player.discord_username}**" if r.player.is_test else f"<@{r.player.discord_id}>"
+            role = ROLE_DISPLAY.get(r.role or "", "role?")
+            champ = r.champion or "champion?"
+            lines.append(f"{mark} {who}: {role} · {champ}")
+        if lines:
+            e.add_field(name=label, value="\n".join(lines), inline=True)
+    if duplicates:
+        e.add_field(name="⚠️ Check these", value="\n".join(
+            f"{'Blue' if t == 1 else 'Red'} has two {ROLE_DISPLAY.get(role, role)} players." for t, role in duplicates),
+            inline=False)
+    if not done:
+        e.set_footer(text="✅ confirmed · ⏳ waiting (shows the bot's guess) · 🤖 filler")
+    return e
+
+
 def leaderboard_embed(rows: list, season: int, final: bool = False) -> discord.Embed:
     """The #leaderboard post. rows = [(PlayerRating, Player)] in ladder order."""
     title = f"Season {season} final standings" if final else f"Leaderboard: Season {season}"

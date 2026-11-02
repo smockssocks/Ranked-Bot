@@ -48,6 +48,7 @@ Stuck? Run `/help` any time.
 | Join | **Join** button, or `/queue` | Then choose main and second role (or Fill) from the dropdowns. Remembered. |
 | Leave | **Leave** button, or `/dequeue` | Only while the lobby is still filling. |
 | Play | nothing | Results are detected automatically. |
+| Confirm | **Confirm my role & champion** in the game thread | Two dropdowns, after the game. Decides which role they're scored in. |
 | Check | `/rank`, `/history`, `/explain` | `/explain` is the one that stops arguments. |
 
 `/help` gives players all of this inside Discord, and it knows whether they have linked yet
@@ -122,9 +123,13 @@ missing). Every button answers privately.
    named after you (e.g. "Dan's inhouse"). Want different captains? **Set captains** on the panel.
 4. When the draft is done, the thread gets the teams and the tournament code (or lobby name
    and password, and who creates the lobby). Each team gets its own voice channel, and players
-   already in voice are moved in.
-5. Play. The bot posts results, updates #leaderboard and closes the lobby by itself. The thread
-   closes and the voice channels go away a little while after the game.
+   already in voice are moved in. Captains fix roles with **Set Blue roles** / **Set Red roles**
+   under the teams. Meanwhile the next lobby has already opened in the queue channel, so the
+   next ten can queue while this game is played.
+5. Play. When the bot finds the game, it asks the ten players in the thread to confirm the role
+   they played and their champion (5 minutes at most; **Finish now** if people wander off). Then
+   it posts results, updates #leaderboard and closes the lobby. The thread closes and the voice
+   channels go away a little while after the game.
 
 If a captain goes AFK, the host or an admin can pick from the dropdown for them, unless they
 are the other captain.

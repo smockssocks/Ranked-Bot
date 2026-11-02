@@ -79,6 +79,7 @@ async def test_casual_game_changes_nobodys_rating(db):
 
 async def test_auto_detect_respects_casual_lobby(db, monkeypatch):
     from bot.services import auto_detect, lobby_manager as lm
+    monkeypatch.setattr(config, "CHECKIN_ENABLED", False)          # straight to scoring
     match, tl = make_match("NA1_autoc", queue_id=0)
 
     class FakeRiot:

@@ -42,8 +42,8 @@ When a lobby is open, press **Join** and pick your main and second role (remembe
 
 {teams}
 
-**4. Play**
-Join the custom game and play. **You don't report anything.** The bot finds the game and posts everyone's LP within a couple of minutes.
+**4. Play, then confirm**
+Join the custom game and play. You don't report the result: the bot finds the game. It then asks each of you to confirm **the role you played and your champion** from two dropdowns (a few seconds), and posts LP.
 
 **Your rank**
 Winning matters most, but how you played counts too, judged against everyone else who played your role. Your first 5 games are placements and move faster.

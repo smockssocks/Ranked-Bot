@@ -55,13 +55,28 @@ THREAD_PERMISSIONS = ("create_private_threads", "send_messages_in_threads")
 STAFF_ADD_LIMIT = 25        # staff who can't already see private threads get added, up to this many
 
 
-def thread_name(host_name: str, lobby: Lobby) -> str:
-    kind = "casual inhouse" if not lobby.ranked else "inhouse"
-    return f"{host_name}'s {kind}"[:100]
+def thread_name(host_name: str, lobby: Lobby, captains: tuple[str, str] | None = None) -> str:
+    """'Danman vs Faker' for a captain draft, so several games at once are easy to tell apart;
+    otherwise named after the host."""
+    kind = "casual " if not lobby.ranked else ""
+    if captains:
+        return f"{captains[0]} vs {captains[1]}" + (" (casual)" if not lobby.ranked else "")
+    return f"{host_name}'s {kind}inhouse"[:100]
 
 
-def voice_names(host_name: str) -> tuple[str, str]:
+def voice_names(host_name: str, captains: tuple[str, str] | None = None) -> tuple[str, str]:
+    if captains:
+        return f"Blue · Team {captains[0]}"[:100], f"Red · Team {captains[1]}"[:100]
     return f"Blue · {host_name}'s inhouse"[:100], f"Red · {host_name}'s inhouse"[:100]
+
+
+async def captain_names(session: AsyncSession, lobby: Lobby) -> tuple[str, str] | None:
+    if not (lobby.captain1_id and lobby.captain2_id):
+        return None
+    c1, c2 = await session.get(Player, lobby.captain1_id), await session.get(Player, lobby.captain2_id)
+    if c1 is None or c2 is None:
+        return None
+    return c1.discord_username, c2.discord_username
 
 
 # --------------------------------------------------------------------------- #
@@ -332,7 +347,7 @@ async def create(guild: Any, session: AsyncSession, lobby: Lobby) -> Any | None:
         return None
     moderator = parent.permissions_for(guild.me).manage_threads
     thread = await parent.create_thread(
-        name=thread_name(await _host_name(guild, session, lobby), lobby),
+        name=thread_name(await _host_name(guild, session, lobby), lobby, await captain_names(session, lobby))[:100],
         type=discord.ChannelType.private_thread,
         # Players can't pull friends in. Without Manage Threads the bot needs this on to add people.
         invitable=not moderator,
@@ -428,7 +443,7 @@ async def open_team_voice(guild: Any, session: AsyncSession, lobby: Lobby) -> tu
             if ch is not None:
                 await ch.delete(reason=REASON)
         category = await _inhouse_category(guild, session, lobby)
-        names = voice_names(await _host_name(guild, session, lobby))
+        names = voice_names(await _host_name(guild, session, lobby), await captain_names(session, lobby))
         chans = []
         for t, name in zip((1, 2), names):
             chans.append(await guild.create_voice_channel(
@@ -468,7 +483,7 @@ async def lobby_for_channel(session: AsyncSession, guild_id: str, channel_id: in
         return None
     return await session.scalar(select(Lobby).where(
         Lobby.guild_id == guild_id, Lobby.game_channel_id == str(channel_id),
-        Lobby.status.in_(("waiting", "drafting", "active"))))
+        Lobby.status.in_(("waiting", "drafting", "active", "confirming"))))
 
 
 def _aware(dt: datetime | None) -> datetime | None:

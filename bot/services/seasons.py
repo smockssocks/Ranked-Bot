@@ -37,7 +37,7 @@ async def load(session: AsyncSession) -> int:
 
 async def start_new(session: AsyncSession) -> tuple[int, int]:
     """End the current season and start the next. Returns (old, new)."""
-    busy = await session.scalar(select(Lobby).where(Lobby.status.in_(("drafting", "active"))))
+    busy = await session.scalar(select(Lobby).where(Lobby.status.in_(("drafting", "active", "confirming"))))
     if busy is not None:
         raise SeasonError(f"Lobby #{busy.id} is still being played. Finish or cancel it first, so its "
                           f"result doesn't land in the wrong season.")

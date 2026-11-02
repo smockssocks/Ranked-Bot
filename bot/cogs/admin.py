@@ -455,7 +455,7 @@ class AdminCog(commands.Cog, name="Admin"):
     @app_commands.describe(count="How many fillers to add. Leave empty to fill the lobby.")
     async def admin_testfill(self, inter: discord.Interaction, count: app_commands.Range[int, 1, 10] | None = None):
         async with SessionLocal() as session:
-            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            lobby = await lobby_manager.get_open_lobby(session, str(inter.guild_id))
             if lobby is None:
                 await inter.response.send_message("Open a lobby first with `/inhouse create`.", ephemeral=True)
                 return
@@ -489,7 +489,7 @@ class AdminCog(commands.Cog, name="Admin"):
     async def admin_testclear(self, inter: discord.Interaction):
         async with SessionLocal() as session:
             removed, cancelled = await lobby_manager.test_clear(session)
-            lobby = await lobby_manager.get_active_lobby(session, str(inter.guild_id))
+            lobby = await lobby_manager.get_open_lobby(session, str(inter.guild_id))
             lobby_cog = self.bot.get_cog("Lobby")
             if lobby and lobby_cog:
                 await session.refresh(lobby)

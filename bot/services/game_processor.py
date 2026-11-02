@@ -158,6 +158,20 @@ async def load_baselines(session: AsyncSession, season: int) -> dict[str, tuple[
     return out
 
 
+def apply_roles(match_data: dict, role_overrides: dict[str, str] | None) -> dict:
+    """A copy of the match with these players' positions set, for scoring. The original is kept."""
+    if not role_overrides:
+        return match_data
+    import copy
+    out = copy.deepcopy(match_data)
+    for p in out.get("info", {}).get("participants", []):
+        role = role_overrides.get(p.get("puuid"))
+        if role:
+            p["teamPosition"] = role
+            p["individualPosition"] = role
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Main pipeline                                                               #
 # --------------------------------------------------------------------------- #
@@ -172,10 +186,15 @@ async def process_match(
     timeline_data: dict | None = None,
     season: int | None = None,
     ranked: bool = True,
+    role_overrides: dict[str, str] | None = None,
 ) -> ProcessResult:
     """
     ranked=False is a casual game: stats and performance scores are computed and
     posted, but no rating, LP, community baseline or anti-smurf check is touched.
+
+    role_overrides = {puuid: ROLE} from the post-game check-in. Riot often leaves roles blank
+    in custom games; these replace Riot's for scoring and lane matchups, and are saved with the
+    game so a reprocess gives the same answer.
     """
     season = season or config.CURRENT_SEASON
     now = datetime.now(timezone.utc)
@@ -226,7 +245,9 @@ async def process_match(
         result.remake = True
         return result
 
-    all_metrics = metrics_svc.extract_all(match_data, timeline_data)
+    if role_overrides is None:
+        role_overrides = (game.processing_notes or {}).get("role_overrides") or None
+    all_metrics = metrics_svc.extract_all(apply_roles(match_data, role_overrides), timeline_data)
     pools = metrics_svc.in_game_pools(all_metrics)
     duration_mins = max(1.0, dur / 60.0)
     baselines = await load_baselines(session, season)
@@ -238,7 +259,8 @@ async def process_match(
         perf[puuid] = re_.performance_score(m, m["role"], baselines[m["role"]][1], pools, duration_mins)
 
     if not ranked:
-        return await _record_casual(session, game, result, all_metrics, perf, season, now, duration_mins)
+        return await _record_casual(session, game, result, all_metrics, perf, season, now, duration_mins,
+                                    role_overrides)
 
     # 2. link players / ratings
     linked: dict[str, Player] = {}
@@ -322,7 +344,7 @@ async def process_match(
     game.status = "processed"
     game.processed_at = now
     game.processing_notes = {"unlinked": result.unlinked, "duration_mins": round(duration_mins, 1),
-                             "_baselines_before": baselines_before}
+                             "_baselines_before": baselines_before, "role_overrides": role_overrides or {}}
     await session.commit()
 
     # 5. anti-smurf pass (never breaks processing)
@@ -340,7 +362,8 @@ async def process_match(
 
 async def _record_casual(session: AsyncSession, game: Game, result: ProcessResult,
                          all_metrics: dict[str, dict[str, Any]], perf: dict[str, re_.PerfResult],
-                         season: int, now: datetime, duration_mins: float) -> ProcessResult:
+                         season: int, now: datetime, duration_mins: float,
+                         role_overrides: dict[str, str] | None = None) -> ProcessResult:
     """Casual game: keep the stats, post them, change nobody's rating."""
     team_ps = {t: [perf[pu].score for pu, m in all_metrics.items() if m["team"] == t] for t in (1, 2)}
     for puuid, m in all_metrics.items():
@@ -376,7 +399,8 @@ async def _record_casual(session: AsyncSession, game: Game, result: ProcessResul
         ))
     game.status = "casual"
     game.processed_at = now
-    game.processing_notes = {"unlinked": result.unlinked, "duration_mins": round(duration_mins, 1), "casual": True}
+    game.processing_notes = {"unlinked": result.unlinked, "duration_mins": round(duration_mins, 1), "casual": True,
+                             "role_overrides": role_overrides or {}}
     await session.commit()
     log.info("Recorded casual game %s: %d linked, no ratings changed", game.riot_match_id, len(result.results))
     return result

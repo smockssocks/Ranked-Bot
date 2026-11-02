@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from bot import config
 from bot.models.lobby import Lobby, LobbyPlayer
 from bot.models.player import Player
 from bot.services import lobby_manager as lm
@@ -156,6 +157,7 @@ async def test_auto_detect_match_belongs(db):
 
 async def test_auto_detect_poll_processes_lobby_game(db, monkeypatch):
     """Fake Riot client: the active lobby's game shows up and is processed automatically."""
+    monkeypatch.setattr(config, "CHECKIN_ENABLED", False)          # straight to scoring
     match, tl = make_match("NA1_auto", queue_id=0)
 
     class FakeRiot:

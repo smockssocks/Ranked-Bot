@@ -2,7 +2,11 @@
 Self-sustaining result pickup. For every lobby in status "active" the loop asks
 Riot for the recent CUSTOM games (queue 0) of two of its players, and when a
 match contains at least AUTO_DETECT_MIN_LOBBY_PLAYERS of the lobby's PUUIDs it
-is processed automatically and the lobby is completed. No /submit needed.
+is picked up. No /submit needed.
+
+With CHECKIN_ENABLED (the default) a found game first goes to the post-game
+check-in, where players confirm role and champion; it is scored after that.
+Remakes skip the check-in.
 """
 from __future__ import annotations
 
@@ -15,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import config
 from bot.models.game import Game
 from bot.models.lobby import Lobby
-from bot.services import game_processor, lobby_manager
+from bot.services import checkin, game_processor, lobby_manager
+from bot.services import metrics as metrics_svc
 from bot.services.riot_api import RiotAPIError, RiotClient, RiotUnavailable
 
 log = logging.getLogger("ranked-bot.autodetect")
@@ -61,9 +66,12 @@ async def find_lobby_match(riot: RiotClient, session: AsyncSession, lobby: Lobby
     return None
 
 
-async def poll_once(session_factory) -> list[tuple[Lobby, game_processor.ProcessResult]]:
-    """One pass over active lobbies. Returns processed (lobby, result) pairs for announcing."""
-    out: list[tuple[Lobby, game_processor.ProcessResult]] = []
+async def poll_once(session_factory) -> list[tuple[Lobby, game_processor.ProcessResult | None]]:
+    """
+    One pass over active lobbies. Returns (lobby, result) pairs for announcing; result is None
+    when the game went to the post-game check-in instead.
+    """
+    out: list[tuple[Lobby, game_processor.ProcessResult | None]] = []
     async with session_factory() as session:
         lobbies = await lobby_manager.active_lobbies(session)
         if not lobbies:
@@ -89,6 +97,14 @@ async def poll_once(session_factory) -> list[tuple[Lobby, game_processor.Process
                     except RiotAPIError as e:
                         log.warning("timeline fetch failed %s: %s", mid, e)
                         timeline = {"info": {"frames": []}}
+                    if config.CHECKIN_ENABLED and not metrics_svc.is_remake(match, config.MIN_GAME_MINUTES):
+                        try:
+                            await checkin.begin(session, lobby, mid, match, timeline)
+                        except checkin.CheckinError as e:
+                            log.info("skip %s: %s", mid, e)
+                            continue
+                        out.append((lobby, None))
+                        continue
                     try:
                         result = await game_processor.process_match(
                             session, mid, submitted_by="auto-detect", lobby_id=lobby.id, auto_detected=True,

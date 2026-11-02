@@ -242,7 +242,31 @@ class PanelCog(commands.Cog, name="Panel"):
         return ch
 
     async def _lobby(self, session, guild_id: str):
-        return await lobby_manager.get_active_lobby(session, guild_id)
+        """The lobby still filling (several games can be running; only one fills at a time)."""
+        return await lobby_manager.get_open_lobby(session, guild_id)
+
+    async def _choose_lobby(self, inter: discord.Interaction, lobbies: list, then, prompt: str):
+        """One lobby: go straight on. Several: ask which, in a dropdown."""
+        if not lobbies:
+            await self._reply(inter, "There's no lobby for that right now.")
+            return
+        if len(lobbies) == 1:
+            await then(inter, lobbies[0].id)
+            return
+        async with SessionLocal() as session:
+            options = []
+            for lob in lobbies[:25]:
+                label = f"Lobby #{lob.id} · {lob.status} · {len(lob.players)}/{lob.max_players}"
+                caps = None
+                if lob.captain1_id and lob.captain2_id:
+                    c1, c2 = await session.get(Player, lob.captain1_id), await session.get(Player, lob.captain2_id)
+                    caps = f"{c1.discord_username} vs {c2.discord_username}" if c1 and c2 else None
+                options.append(discord.SelectOption(label=label[:100], value=str(lob.id),
+                                                    description=(caps or "")[:100] or None))
+
+        async def chosen(i: discord.Interaction, values: list[str]):
+            await then(i, int(values[0]))
+        await self._reply(inter, prompt, view=ChoiceView(options, chosen, "Choose a lobby"))
 
     async def _lobby_options(self, session, lobby) -> list[discord.SelectOption]:
         place = await ladder.positions(session)
@@ -301,24 +325,33 @@ class PanelCog(commands.Cog, name="Panel"):
 
     async def do_cancel(self, inter: discord.Interaction):
         async with SessionLocal() as session:
-            lobby = await self._lobby(session, str(inter.guild_id))
-        if lobby is None:
-            await self._reply(inter, "There's no open lobby.")
-            return
+            lobbies = await lobby_manager.live_lobbies(session, str(inter.guild_id))
 
-        async def confirmed(i: discord.Interaction):
+        async def ask(i: discord.Interaction, lobby_id: int):
             async with SessionLocal() as session:
-                fresh = await session.get(lobby_manager.Lobby, lobby.id)
-                if fresh is None or fresh.status not in lobby_manager.ACTIVE_STATUSES:
-                    await i.response.edit_message(content="That lobby already ended.", view=None)
-                    return
-                await lobby_manager.cancel_lobby(session, fresh, str(i.user.id), is_admin=True)
-                await self.lobby_cog.refresh_lobby_message(session, fresh)
-                from bot.cogs.lobby import cleanup_note
-                await self.lobby_cog.post_to_game(fresh, f"**Lobby cancelled** by {i.user.mention}. {cleanup_note()}")
-            await i.response.edit_message(content=f"Lobby #{lobby.id} cancelled.", view=None)
-        await self._reply(inter, f"Cancel lobby #{lobby.id} ({lobby.status}, {len(lobby.players)} players)?",
-                          view=ConfirmView("Cancel the lobby", confirmed))
+                lobby = await session.get(lobby_manager.Lobby, lobby_id)
+                desc = f"{lobby.status}, {len(lobby.players)} players" if lobby else "gone"
+
+            async def confirmed(j: discord.Interaction):
+                async with SessionLocal() as session:
+                    fresh = await session.get(lobby_manager.Lobby, lobby_id)
+                    if fresh is None or fresh.status not in lobby_manager.LIVE_STATUSES:
+                        await j.response.edit_message(content="That lobby already ended.", view=None)
+                        return
+                    await lobby_manager.cancel_lobby(session, fresh, str(j.user.id), is_admin=True)
+                    await self.lobby_cog.refresh_lobby_message(session, fresh)
+                    from bot.cogs.lobby import cleanup_note
+                    await self.lobby_cog.post_to_game(fresh, f"**Lobby cancelled** by {j.user.mention}. {cleanup_note()}")
+                await j.response.edit_message(content=f"Lobby #{lobby_id} cancelled.", view=None)
+            text = f"Cancel lobby #{lobby_id} ({desc})? A game that's being played won't count."
+            view = ConfirmView("Cancel the lobby", confirmed)
+            if i.response.is_done():
+                await i.followup.send(text, view=view, ephemeral=True)
+            elif i.message is not None and i.message.flags.ephemeral:
+                await i.response.edit_message(content=text, view=view)
+            else:
+                await i.response.send_message(text, view=view, ephemeral=True)
+        await self._choose_lobby(inter, lobbies, ask, "Which lobby should be cancelled?")
 
     # ------------------------------------------------------------------ #
     # Players                                                              #
@@ -367,22 +400,21 @@ class PanelCog(commands.Cog, name="Panel"):
 
     async def do_captains(self, inter: discord.Interaction):
         async with SessionLocal() as session:
-            lobby = await self._lobby(session, str(inter.guild_id))
-            if lobby is None or lobby.mode != "captain" or lobby.status not in ("waiting", "drafting"):
-                await self._reply(inter, "There's no captain lobby waiting for a draft.")
-                return
-            if len(lobby.players) < lobby.max_players:
-                await self._reply(inter, f"The lobby isn't full yet ({len(lobby.players)}/{lobby.max_players}).")
-                return
-            if ready_check.running(lobby):
-                await self._reply(inter, "Wait for the ready check to finish first.")
-                return
+            lobbies = [l for l in await lobby_manager.live_lobbies(session, str(inter.guild_id))
+                       if l.mode == "captain" and len(l.players) >= l.max_players
+                       and l.status in ("waiting", "drafting") and not ready_check.running(l)]
+        await self._choose_lobby(inter, lobbies, self._captains_for,
+                                 "Which lobby? (Only full captain lobbies that haven't finished drafting.)")
+
+    async def _captains_for(self, inter: discord.Interaction, lobby_id: int):
+        async with SessionLocal() as session:
+            lobby = await session.get(lobby_manager.Lobby, lobby_id)
             options = await self._lobby_options(session, lobby)
 
         async def chosen(i: discord.Interaction, values: list[str]):
             await i.response.defer(ephemeral=True)
             async with SessionLocal() as session:
-                fresh = await session.get(lobby_manager.Lobby, lobby.id)
+                fresh = await session.get(lobby_manager.Lobby, lobby_id)
                 order = await ladder.ladder_order(session, [int(v) for v in values])
                 from bot import config
                 blue, red = (order[1], order[0]) if config.CAPTAIN_FIRST_PICK != "higher" else (order[0], order[1])
@@ -392,13 +424,18 @@ class PanelCog(commands.Cog, name="Panel"):
                     await self._reply(i, str(e))
                     return
                 await self.lobby_cog.refresh_lobby_message(session, fresh)
+                await self.lobby_cog.open_next_lobby(session, fresh)
                 channel = await self.lobby_cog._queue_channel(fresh)
                 await self.lobby_cog.start_captain_space(session, fresh, cap1, cap2, channel,
                                                          header=f"Captains chosen by {i.user.display_name}.")
             await self._reply(i, f"Draft started: **{cap1.discord_username}** (blue, picks first) and "
                                  f"**{cap2.discord_username}** (red).")
-        await self._reply(inter, "Choose the two captains. The lower-ranked one picks first.",
-                          view=ChoiceView(options, chosen, "Choose two captains", min_values=2, max_values=2))
+        text = f"Lobby #{lobby_id}: choose the two captains. The lower-ranked one picks first."
+        view = ChoiceView(options, chosen, "Choose two captains", min_values=2, max_values=2)
+        if inter.message is not None and inter.message.flags.ephemeral and not inter.response.is_done():
+            await inter.response.edit_message(content=text, view=view)
+        else:
+            await self._reply(inter, text, view=view)
 
     # ------------------------------------------------------------------ #
     # Games                                                                #
@@ -413,6 +450,10 @@ class PanelCog(commands.Cog, name="Panel"):
             result, err = await self.lobby_cog.record_game(session, str(inter.guild_id), raw, inter.user.name)
         if err:
             await self._reply(inter, err)
+            return
+        if result is None:
+            await self._reply(inter, "Found it. The players are confirming roles and champions in the game thread; "
+                                     "LP is posted when they're done (or press Finish now there).")
             return
         await self._reply(inter, "Recorded.", embed=embeds.results_embed(result))
 

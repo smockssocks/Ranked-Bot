@@ -35,7 +35,10 @@ from bot.services.rating_engine import ROLES, normalize_role, ROLE_DISPLAY
 log = logging.getLogger("ranked-bot.lobby")
 
 MODES = ("pick_order", "balanced", "captain")
+# A player in a lobby with one of these statuses is busy: they can't queue for another.
 ACTIVE_STATUSES = ("waiting", "drafting", "active")
+# Lobbies that still exist from Discord's point of view (their thread is open).
+LIVE_STATUSES = ACTIVE_STATUSES + ("confirming",)
 
 
 class LobbyError(Exception):
@@ -53,10 +56,11 @@ async def create_lobby(session: AsyncSession, guild_id: str, channel_id: str, ho
     banned = await bans.active_ban(session, guild_id, host_discord_id)
     if banned is not None:
         raise LobbyError(bans.player_message(banned) + " You can't host a lobby while banned.")
-    existing = await session.scalar(select(Lobby).where(
-        Lobby.guild_id == guild_id, Lobby.channel_id == channel_id, Lobby.status.in_(ACTIVE_STATUSES)))
+    # Several games can run at once, but only one lobby fills in a channel at a time.
+    existing = await get_open_lobby(session, guild_id, channel_id)
     if existing:
-        raise LobbyError("A lobby is already active in this channel. Cancel or finish it first.")
+        raise LobbyError(f"Lobby #{existing.id} is already filling in this channel. Join that one, "
+                         f"or cancel it first.")
     lobby = Lobby(guild_id=guild_id, channel_id=channel_id, host_discord_id=host_discord_id, mode=mode,
                   max_players=max_players or config.LOBBY_SIZE, ranked=ranked)
     session.add(lobby)
@@ -70,6 +74,7 @@ async def cancel_lobby(session: AsyncSession, lobby: Lobby, requestor_discord_id
         raise LobbyError("Only the host (or an admin) can cancel the lobby.")
     lobby.status = "cancelled"
     lobby.ready_deadline = None
+    lobby.checkin_deadline = None
     await session.commit()
     return lobby
 
@@ -78,6 +83,29 @@ async def get_active_lobby(session: AsyncSession, guild_id: str, channel_id: str
     q = select(Lobby).where(Lobby.guild_id == guild_id, Lobby.status.in_(ACTIVE_STATUSES))
     if channel_id:
         q = q.where(Lobby.channel_id == channel_id)
+    return await session.scalar(q.order_by(Lobby.id.desc()))
+
+
+async def get_open_lobby(session: AsyncSession, guild_id: str, channel_id: str | None = None) -> Lobby | None:
+    """The lobby still filling (in this channel, if given). There's at most one per channel."""
+    q = select(Lobby).where(Lobby.guild_id == guild_id, Lobby.status == "waiting")
+    if channel_id:
+        q = q.where(Lobby.channel_id == channel_id)
+    return await session.scalar(q.order_by(Lobby.id.desc()))
+
+
+async def live_lobbies(session: AsyncSession, guild_id: str) -> list[Lobby]:
+    """Every lobby in this server that hasn't finished, newest first."""
+    return list((await session.execute(select(Lobby).where(
+        Lobby.guild_id == guild_id, Lobby.status.in_(LIVE_STATUSES)).order_by(Lobby.id.desc()))).scalars().all())
+
+
+async def busy_in(session: AsyncSession, player_id: int, other_than: int | None = None) -> Lobby | None:
+    """The lobby this player is already queued in or playing, if any."""
+    q = (select(Lobby).join(LobbyPlayer, LobbyPlayer.lobby_id == Lobby.id)
+         .where(LobbyPlayer.player_id == player_id, Lobby.status.in_(ACTIVE_STATUSES)))
+    if other_than is not None:
+        q = q.where(Lobby.id != other_than)
     return await session.scalar(q.order_by(Lobby.id.desc()))
 
 
@@ -106,6 +134,12 @@ async def queue_player(session: AsyncSession, lobby: Lobby, discord_id: str,
         raise LobbyError("You need to link your Riot account first: `/link GameName#TAG`.")
     if any(lp.player_id == p.id for lp in lobby.players):
         raise LobbyError("You are already in the queue.")
+    other = await busy_in(session, p.id, other_than=lobby.id)
+    if other is not None:
+        what = "queued in" if other.status == "waiting" else "playing in"
+        raise LobbyError(f"{'You are' if not ignore_cooldown else p.discord_username + ' is'} already {what} "
+                         f"lobby #{other.id}. One game at a time. If that game is over, a mod can submit or "
+                         f"cancel it.")
     until = None if ignore_cooldown else ready_check.cooldown_left(p)
     if until is not None:
         raise LobbyError(ready_check.cooldown_message(until))
@@ -307,7 +341,7 @@ async def test_clear(session: AsyncSession) -> tuple[int, int]:
         return 0, 0
     touched = (await session.execute(
         select(Lobby).join(LobbyPlayer, LobbyPlayer.lobby_id == Lobby.id)
-        .where(LobbyPlayer.player_id.in_(ids), Lobby.status.in_(("drafting", "active"))))).scalars().unique().all()
+        .where(LobbyPlayer.player_id.in_(ids), Lobby.status.in_(("drafting", "active", "confirming"))))).scalars().unique().all()
     for lobby in touched:
         lobby.status = "cancelled"
     await session.execute(update(Lobby).where(

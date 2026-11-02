@@ -151,6 +151,12 @@ READY_CHECK_SECONDS = _int("READY_CHECK_SECONDS", 90)
 READY_CHECK_COOLDOWN_MINUTES = _int("READY_CHECK_COOLDOWN_MINUTES", 3)
 # Start the lobby by itself once all ten accept. Off: the host presses Start.
 READY_CHECK_AUTO_START = _bool("READY_CHECK_AUTO_START", True)
+# When a lobby starts, open the next one in the same channel, so several games can run at once.
+AUTO_NEXT_LOBBY = _bool("AUTO_NEXT_LOBBY", True)
+# After a game, players confirm the role they played and their champion before LP is applied.
+# Riot often leaves roles blank in custom games, so this is what keeps role stats right.
+CHECKIN_ENABLED = _bool("CHECKIN_ENABLED", True)
+CHECKIN_MINUTES = _int("CHECKIN_MINUTES", 5)
 # A private thread under the queue channel for each started inhouse, for its players and staff.
 GAME_CHANNELS_ENABLED = _bool("GAME_CHANNELS_ENABLED", True)
 # Minutes after a game ends before its thread is closed and team voice removed. 0 = never.

@@ -16,7 +16,7 @@ class Lobby(Base):
     # False = casual: results are posted but nobody's LP, baselines or smurf checks are touched.
     ranked: Mapped[bool] = mapped_column(Boolean, server_default=true(), default=True)
     status: Mapped[str] = mapped_column(String(16), server_default="waiting")
-    # waiting / drafting / active / completed / cancelled
+    # waiting / drafting / active / confirming (post-game check-in) / completed / cancelled
     max_players: Mapped[int] = mapped_column(Integer, server_default="10")
     tournament_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Private thread for this game's players and staff, and how to get into the custom game.
@@ -27,6 +27,10 @@ class Lobby(Base):
     # Ready check: set while players are being asked to accept; the message showing who has.
     ready_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ready_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Post-game check-in: the game that was found, and players confirming role and champion.
+    result_match_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    checkin_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    checkin_message_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     join_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     join_password: Mapped[str | None] = mapped_column(String(32), nullable=True)
     join_creator_id: Mapped[int | None] = mapped_column(Integer, nullable=True)   # player who makes the lobby
@@ -61,6 +65,10 @@ class LobbyPlayer(Base):
     # captain mode: the draft pick index (-1 for captains). Only compare within one mode.
     pick_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # ready check
+    # Post-game check-in: the role they say they played and the champion they say was theirs.
+    confirmed_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    confirmed_champion: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     lobby: Mapped["Lobby"] = relationship("Lobby", back_populates="players")
