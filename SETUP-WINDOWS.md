@@ -209,6 +209,36 @@ next start. Your players come with you because `ranked_bot.db` moves with the fo
 
 ---
 
+## Adding the bot to another server
+
+One running bot serves every server it's in. Don't start a second copy: two copies with the
+same token answer every command twice.
+
+1. **Open the invite link** from Part 3, step 7, with your Client ID in it:
+   ```
+   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applications.commands&permissions=361063640144
+   ```
+   Pick the other server and click **Authorize**. You need **Manage Server** there.
+   Inviting it to a server someone else owns? Either they open the link themselves, which needs
+   **Public Bot** turned on (Developer Portal > your application > **Bot**), or they give you
+   Manage Server for a minute.
+2. **Copy the new server's ID** (right-click its name > Copy Server ID) and add it to `.env`
+   after the first one, with a comma and no spaces:
+   ```
+   DISCORD_GUILD_ID=111111111111111111,222222222222222222
+   ```
+3. **Restart the bot** (close the window, run START-BOT.bat). The bot window says
+   `Slash commands synced to server ...` once for each server.
+4. In the new server, **run `/admin setup`**. Each server has its own channels, queue channel,
+   modes, mod role, lobbies and queue bans.
+
+**What the servers share:** player accounts and the ranked ladder. Someone linked in one server
+is linked in both, and their LP and rank are the same everywhere, because the bot has one ladder.
+That's what you want if both servers are the same community. If the other server is a
+separate community that should have its own leaderboard, the bot needs a change first.
+
+They also share your one Riot key and its rate limit, which is plenty for a few servers.
+
 ## When something goes wrong
 
 **The black window flashes open and vanishes instantly.**

@@ -30,11 +30,17 @@ class RankedBot(commands.Bot):
         await init_db()
         for cog in COGS:
             await self.load_extension(cog)
-        if config.DISCORD_GUILD_ID:
-            guild = discord.Object(id=config.DISCORD_GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            log.info("Slash commands synced to guild %s", config.DISCORD_GUILD_ID)
+        if config.DISCORD_GUILD_IDS:
+            for gid in config.DISCORD_GUILD_IDS:
+                guild = discord.Object(id=gid)
+                self.tree.copy_global_to(guild=guild)
+                try:
+                    await self.tree.sync(guild=guild)
+                    log.info("Slash commands synced to server %s", gid)
+                except discord.Forbidden:
+                    # Not in that server yet, or invited without applications.commands.
+                    log.warning("Couldn't add slash commands to server %s. Is the bot in it? Invite it with "
+                                "the link in SETUP-WINDOWS.md, then restart.", gid)
         else:
             await self.tree.sync()
             log.info("Slash commands synced globally (can take up to an hour to appear)")

@@ -49,7 +49,22 @@ def _bool(name: str, default: bool) -> bool:
 
 # --- Discord ---------------------------------------------------------------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
-DISCORD_GUILD_ID = _int("DISCORD_GUILD_ID", 0)
+
+
+def _ids(name: str) -> list[int]:
+    """One ID, or several separated by commas: 111111111111111111,222222222222222222"""
+    out = []
+    for part in os.getenv(name, "").replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.append(int(part))
+    return out
+
+
+# The servers to put slash commands in right away. Several are fine, separated by commas.
+# Empty = every server the bot is in, but new commands can take up to an hour to show up.
+DISCORD_GUILD_IDS = _ids("DISCORD_GUILD_ID")
+DISCORD_GUILD_ID = DISCORD_GUILD_IDS[0] if DISCORD_GUILD_IDS else 0
 MOD_CHANNEL_ID = _int("MOD_CHANNEL_ID", 0)          # smurf flags / alerts go here
 RESULTS_CHANNEL_ID = _int("RESULTS_CHANNEL_ID", 0)  # optional: post-game summaries
 QUEUE_CHANNEL_ID = _int("QUEUE_CHANNEL_ID", 0)      # lock inhouse queues to one channel

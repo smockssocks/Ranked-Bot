@@ -91,8 +91,10 @@ def check_env() -> None:
         )
 
     guild = env.get("DISCORD_GUILD_ID", "")
-    good = guild.isdigit() and len(guild) >= 17
-    say(good, "DISCORD_GUILD_ID", "" if good else "should be a long number like 123456789012345678")
+    ids = [g.strip() for g in guild.replace(";", ",").split(",") if g.strip()]
+    good = bool(ids) and all(g.isdigit() and len(g) >= 17 for g in ids)
+    say(good, "DISCORD_GUILD_ID", f"{len(ids)} servers" if good and len(ids) > 1 else "" if good else
+        "should be a long number like 123456789012345678 (several: separate them with commas)")
     if not good:
         problems.append(
             "DISCORD_GUILD_ID is not filled in.\n"
