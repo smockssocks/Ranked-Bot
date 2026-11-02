@@ -37,7 +37,7 @@ async def test_link_requires_changing_to_the_named_icon(db):
     async with db() as s:
         c = await al.begin(s, riot, "111", "dan", "Danman#NA1", rng=random.Random(1), now=NOW)
         assert isinstance(c, al.Challenge) and c.icon_id in al.STARTER_ICONS and c.icon_id != 4000
-        with pytest.raises(al.LinkError, match=f"still \\*\\*#4000\\*\\*, not \\*\\*#{c.icon_id}"):
+        with pytest.raises(al.LinkError, match=f"still shows your profile icon as \\*\\*#4000\\*\\*, not \\*\\*#{c.icon_id}"):
             await al.verify(s, riot, "111", "dan", now=NOW + timedelta(minutes=1))
         assert await s.scalar(select(LinkRequest)) is not None            # still pending, can retry
         riot.icons["puuid-dan"] = c.icon_id                                 # the owner changes their icon

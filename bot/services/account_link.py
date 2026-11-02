@@ -30,7 +30,7 @@ from bot.models.link import LinkRequest
 from bot.models.player import Player
 
 STARTER_ICONS = tuple(range(0, 29))   # owned by every League account
-VERIFY_MINUTES = 10
+VERIFY_MINUTES = 30    # Riot can take a while to report a new icon (often not until the player logs out)
 DDRAGON_FALLBACK_VERSION = "14.24.1"
 
 
@@ -134,8 +134,9 @@ async def verify(session: AsyncSession, riot: Any, discord_id: str, discord_name
     summoner = await riot.get_summoner_by_puuid(req.puuid)
     icon = summoner.get("profileIconId")
     if icon != req.icon_id:
-        raise LinkError(f"Your profile icon is still **#{icon}**, not **#{req.icon_id}**. Change it in the League "
-                        f"client, give it about a minute to update, then press **Verify** again.")
+        raise LinkError(f"Riot still shows your profile icon as **#{icon}**, not **#{req.icon_id}**. Riot is slow "
+                        f"to update it: after changing it in the League client, log out of League completely, "
+                        f"wait a minute, then press **Verify** again.")
 
     holder = await session.scalar(select(Player).where(Player.riot_puuid == req.puuid,
                                                         Player.discord_id != discord_id))

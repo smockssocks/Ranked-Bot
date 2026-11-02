@@ -256,7 +256,8 @@ class AdminCog(commands.Cog, name="Admin"):
                          f"to **icon #{c.icon_id}**, shown here. Every account has it.\n\n"
                          f"**1.** In the League client, click your profile picture, top right.\n"
                          f"**2.** Choose the icon shown here and save.\n"
-                         f"**3.** Wait about a minute, then press **Verify**.\n\n"
+                         f"**3.** Log out of League completely (Riot only updates your icon after that), "
+                         f"then press **Verify**.\n\n"
                          f"You have {mins} minutes. You can change your icon back once you're verified."),
             color=discord.Color.blurple())
         e.set_thumbnail(url=await account_link.icon_image_url(c.icon_id))
