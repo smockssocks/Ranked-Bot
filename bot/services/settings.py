@@ -17,6 +17,8 @@ ALL_MODES = ("pick_order", "balanced", "captain")
 MODE_NAMES = {"pick_order": "Pick order", "balanced": "Balanced", "captain": "Captain draft"}
 KEY_RESULTS_CHANNEL = "results_channel_id"
 KEY_SEASON = "season"
+KEY_LEADERBOARD_CHANNEL = "leaderboard_channel_id"
+KEY_LEADERBOARD_MESSAGE = "leaderboard_message_id"
 
 
 async def get_setting(session: AsyncSession, guild_id: str, key: str, default: str | None = None) -> str | None:
@@ -63,11 +65,6 @@ async def results_channel_id(session: AsyncSession, guild_id: str) -> int:
     return int(v) if v else config.RESULTS_CHANNEL_ID
 
 
-async def current_season(session: AsyncSession, guild_id: str) -> int:
-    v = await get_setting(session, guild_id, KEY_SEASON)
-    return int(v) if v else config.CURRENT_SEASON
-
-
 # --------------------------------------------------------------------------- #
 # Lobby modes                                                                 #
 # --------------------------------------------------------------------------- #
@@ -76,12 +73,12 @@ async def allowed_modes(session: AsyncSession, guild_id: str) -> list[str]:
     v = await get_setting(session, guild_id, KEY_ALLOWED_MODES)
     raw = v.split(",") if v is not None else config.ALLOWED_MODES
     modes = [m for m in ALL_MODES if m in {x.strip() for x in raw}]
-    return modes or ["pick_order"]
+    return modes or ["captain"]
 
 
 async def default_mode(session: AsyncSession, guild_id: str) -> str:
     v = await get_setting(session, guild_id, KEY_DEFAULT_MODE)
-    return v if v in ALL_MODES else (config.DEFAULT_MODE if config.DEFAULT_MODE in ALL_MODES else "pick_order")
+    return v if v in ALL_MODES else (config.DEFAULT_MODE if config.DEFAULT_MODE in ALL_MODES else "captain")
 
 
 async def casual_allowed(session: AsyncSession, guild_id: str) -> bool:

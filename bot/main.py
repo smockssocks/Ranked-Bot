@@ -15,7 +15,8 @@ from bot.ui import embeds
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("ranked-bot")
 
-COGS = ["bot.cogs.lobby", "bot.cogs.ranking", "bot.cogs.admin", "bot.cogs.moderation", "bot.cogs.chat"]
+COGS = ["bot.cogs.lobby", "bot.cogs.ranking", "bot.cogs.admin", "bot.cogs.moderation", "bot.cogs.chat",
+        "bot.cogs.panel"]
 
 
 class RankedBot(commands.Bot):
@@ -28,6 +29,9 @@ class RankedBot(commands.Bot):
     async def setup_hook(self):
         self.tree.error(self._on_app_command_error)
         await init_db()
+        from bot.services import seasons
+        async with SessionLocal() as session:
+            log.info("Season %s", await seasons.load(session))
         for cog in COGS:
             await self.load_extension(cog)
         if config.DISCORD_GUILD_IDS:
@@ -125,6 +129,9 @@ class RankedBot(commands.Bot):
         mod = self.get_cog("Moderation")
         if mod and result.smurf_flags:
             await mod.post_flags(lobby.guild_id, result.smurf_flags)
+        ranking = self.get_cog("Ranking")
+        if ranking:
+            await ranking.refresh_board(lobby.guild_id)
 
     @auto_detect_loop.before_loop
     async def _before_auto(self):

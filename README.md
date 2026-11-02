@@ -91,14 +91,21 @@ prefers containers on a Linux host.
 
 1. Type `/` in a channel and confirm `/link`, `/queue`, `/inhouse` and `/rank` appear.
 2. **`/admin setup`** builds the server: INFORMATION, INHOUSES and STAFF categories, the queue,
-   chat, results and mod channels, Lobby / Blue Side / Red Side voice rooms, and an
-   **@Inhouse Mod** role. It wires the bot's queue, results and mod-alert settings to those
-   channels, and posts and pins the player guide. It shows a preview first, only ever adds
+   chat, results, leaderboard and mod channels, Lobby / Blue Side / Red Side voice rooms, and an
+   **@Inhouse Mod** role. It wires the bot's queue, results, leaderboard and mod-alert settings to
+   those channels, posts and pins the player guide (with **Link my account** and **My rank**
+   buttons), posts the live leaderboard, and posts the mod **control panel** in #bot-admin. It shows a preview first, only ever adds
    things, and reuses any channel you already have with the same name. It needs Manage
    Channels, Manage Roles and Manage Messages, and gives you a one-click link if they're missing.
    It also warns if the bot is missing what game threads and team voice need.
-3. Give your moderators the **@Inhouse Mod** role.
-4. Everyone runs `/link GameName#TAG` once. Nobody can queue before linking.
+3. Give your moderators the **@Inhouse Mod** role. They run game nights from the control panel.
+4. Everyone presses **Link my account** in #how-to-play (or runs `/link GameName#TAG`) once.
+   Nobody can queue before linking.
+
+**Upgrading from an older version?** Run `/admin setup` again to get #leaderboard, the control
+panel and the guide buttons. If your `.env` or `/admin modes` still allows pick order, switch to
+captain draft only with:
+`/admin modes pick_order:False balanced:False captain:True default:Captain draft`
 
 To test scoring without playing a fresh game, take any past 10-player custom from your match
 history and run `/admin submit 5650481942` with the number from its post-game screen.
@@ -121,14 +128,17 @@ Run the test suite any time with `pytest`. It needs no network, Discord or keys.
    (`READY_CHECK_AUTO_START=false` makes the host press **Start** instead;
    `READY_CHECK_ENABLED=false` turns ready checks off).
 4. **Starting** (automatic after the ready check, or **Start** / `/inhouse start`):
-   - **Pick order** (the default): the bot makes the fairest split by rating and gives each
-     player a pick position 1 to 5. There is no role queue. Pick 1 claims their role first in
-     champ select. Positions rotate, so players who had late picks recently get early ones.
-   - **Balanced:** the bot tries all 126 possible 5v5 splits and picks the one with the
-     smallest MMR gap that also honours stated role preferences (role queue).
-   - **Captain:** the two highest-rated players (or random with `random_captains:true`) become
-     captains and snake-draft with `/inhouse pick @player`. Captains can move people with
-     `/inhouse role @player Jungle`.
+   - **Captain draft** (the default, and the only mode switched on out of the box): the two
+     players highest on the season leaderboard become captains. Early in a season, before
+     anyone has played, it falls back to hidden rating, which carries over between seasons.
+     The **lower-ranked captain picks first** (`CAPTAIN_FIRST_PICK=higher` flips that), then
+     it snakes 1-2-2-1-1-2-2-1. Captains pick from a **dropdown** on the draft board in the
+     game's thread, which shows each player's ladder place, LP and preferred roles. Roles are
+     then suggested from everyone's preferences; captains can move people with
+     `/inhouse role @player Jungle`. A mod can override the captains from the control panel.
+   - **Pick order** (off by default): fairest split by rating, pick positions 1 to 5, no role
+     queue.
+   - **Balanced** (off by default): the smallest MMR gap that also honours role preferences.
 
    Admins choose which of these hosts may open with `/admin modes`. Hosts can add
    `casual:True` to `/inhouse create` for a game that posts stats but changes nobody's LP.
@@ -158,8 +168,10 @@ test custom will not show up, so test the pipeline with `/admin submit` on a pas
 ### Lobbies
 - One lobby per channel, persistent buttons, state stored in the database so a restart mid-lobby
   loses nothing.
-- Three team modes. **Pick order** is the default and has no role queue; balanced and captain
-  draft use role preferences. Admins switch modes on and off with `/admin modes`.
+- **Captain draft** by default: captains are the top two on the leaderboard and pick from a
+  dropdown. Pick order and balanced are available with `/admin modes`.
+- **Roles:** after pressing Join, players choose a main and second role (or Fill) from two
+  dropdowns. The choice is remembered for next time, and captains see it while drafting.
 - **Casual lobbies** (`/inhouse create casual:True`) post results but never touch LP, the
   community role averages, or the anti-smurf checks.
 - **Ready check** when a lobby fills: Accept / Decline buttons that update live, a 3-minute
@@ -247,7 +259,9 @@ knows about you. `CHAT_PERSONA` in `.env` changes its personality.
 | `/admin queuechannel` | Lock every queue command and lobby button to one channel. Run it with no options to see the current setting, or `clear:True` to allow any channel. |
 | `/admin modchannel`, `/admin resultschannel` | Channels. |
 | `/admin baselines` | What the server currently considers average per role. |
-| `/admin season` | Seasons: change `CURRENT_SEASON` in `.env` and restart for a fresh ladder; old seasons stay in the database. |
+| `/admin season` | Shows the season and how new seasons work. Start one with **New season** on the control panel. |
+| `/admin leaderboardchannel #channel` | Put the live leaderboard in a channel (setup does this for #leaderboard). |
+| `/panel` | Post the mod control panel in the channel you run it in (setup does this for #bot-admin). |
 
 ---
 
@@ -337,8 +351,9 @@ test suite checks this with the real engine over simulated seasons:
 | Role queue | ranks higher | ranks lower |
 | Pick order | ranks lower | ranks higher |
 
-That is why pick order is the default, and why there is no separate "versatility bonus" in the
-LP formula: it would count the same thing twice and could be farmed.
+This server now runs captain draft by default; pick order is still there (`/admin modes`) if
+you want it back. Either way there is no separate "versatility bonus" in the LP formula: it
+would count the same thing twice and could be farmed.
 
 **Versatility makes it visible.** `/rank` shows a score built from each role's average
 performance, where roles with little evidence are pulled toward a slightly-below-average
@@ -409,6 +424,41 @@ https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applic
 approve.** It keeps everything and only adds the new
 permissions. `/admin setup` tells you if any are missing. The queue channel stops players
 starting threads; the bot gives itself an exception there automatically.
+
+## Control panel, leaderboard channel and seasons
+
+**Control panel.** A pinned message in #bot-admin with buttons, so mods never have to type
+commands on a game night. Every answer is private, and only staff (Manage Messages, Manage
+Server, or the @Inhouse Mod role) can press them.
+
+| Row | Buttons |
+| --- | --- |
+| Lobby | **Open lobby**, **Open casual lobby** (in the queue channel, with you as host), **Start now**, **Cancel lobby** (asks first) |
+| Players | **Add player** (member picker), **Remove player** (no cooldown for them), **Set captains** (overrides the leaderboard) |
+| Games | **Submit game** (type the game ID), **Undo a game** (choose from the last 10, asks first) |
+| Moderation | **Queue ban** (member picker, then length and reason), **Lift ban**, **Smurf flags** (review and resolve) |
+| Season | **Refresh leaderboard**, **New season** (asks first) |
+
+Smurf alerts in the mod channel also carry **Confirmed smurf** and **False alarm** buttons.
+Lost the panel? Run `/panel` where you want it.
+
+**Leaderboard channel.** #leaderboard holds one post with the season's top `LEADERBOARD_SIZE`
+(20): place, tier, LP, wins and losses, win rate, win streaks, and who is still in placements.
+It updates itself after every game (and every 10 minutes as a safety net), and has **My rank**
+and **My last game** buttons that answer privately. The same ordering decides captains.
+
+**Seasons.** The season number is saved in the database. **New season** on the control panel
+(it refuses while a game is being played):
+- freezes the current leaderboard post as "Season N final standings" and starts a fresh one;
+- puts everyone back to `STARTING_LP` with `PLACEMENT_GAMES` placements;
+- keeps `SEASON_CARRYOVER` (half, by default) of each player's hidden rating, so teams and
+  captains are fair from the first game, and carries the community's role averages over;
+- keeps every old game and rating in the database.
+
+Raising `CURRENT_SEASON` in `.env` and restarting also starts a new season (the higher of the
+two numbers wins). There is no LP decay for inactivity: after `INACTIVITY_DECAY_DAYS` without
+a game, the bot only becomes less sure of a player's hidden rating, so their next games move it
+more.
 
 ## Queue bans
 

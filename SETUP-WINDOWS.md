@@ -146,11 +146,13 @@ it is running. Leave the window open.** Closing it turns the bot off.
    | Category | Channels | Who can post |
    | --- | --- | --- |
    | INFORMATION | `#how-to-play`, `#announcements` | Staff only. The bot posts and pins the player guide in `#how-to-play`. |
-   | INHOUSES | `#inhouse-queue`, `#inhouse-chat`, `#match-results`, voice: Lobby, Blue Side, Red Side | Everyone chats in `#inhouse-chat`. The queue channel is commands only, so the lobby post never gets buried. Results are posted by the bot. |
-   | STAFF | `#mod-flags`, `#bot-admin` | Hidden from players. Visible to the new **@Inhouse Mod** role. |
+   | INHOUSES | `#inhouse-queue`, `#inhouse-chat`, `#match-results`, `#leaderboard`, voice: Lobby, Blue Side, Red Side | Everyone chats in `#inhouse-chat`. The queue channel is commands only, so the lobby post never gets buried. Results and the live top 20 are posted by the bot. |
+   | STAFF | `#mod-flags`, `#bot-admin` | Hidden from players. Visible to the new **@Inhouse Mod** role. The mod **control panel** is pinned in `#bot-admin`. |
 
    It also points the bot at these channels: queues in `#inhouse-queue`, results in
-   `#match-results`, smurf alerts in `#mod-flags`.
+   `#match-results`, the leaderboard in `#leaderboard`, smurf alerts in `#mod-flags`.
+   The player guide in `#how-to-play` gets **Link my account**, **My rank** and
+   **My last game** buttons.
 
    Setup only ever **adds** things. It never deletes, renames or changes channels you
    already have, and if you already have a channel with one of those names it uses yours.
@@ -158,16 +160,20 @@ it is running. Leave the window open.** Closing it turns the bot off.
 
    If it says it is **missing permissions**, it gives you a link to fix that in one click.
    Your bot needs Manage Channels, Manage Roles and Manage Messages to build the server.
-3. Give your moderators the **@Inhouse Mod** role.
-4. Everyone who wants to play runs `/link` once, for example `/link Danman#NA1`. The bot shows
-   them a profile icon to switch to in the League client and a **Verify** button. That proves
-   the account is theirs. Nobody can join a queue until they have linked.
+3. Give your moderators the **@Inhouse Mod** role. They run game nights from the control panel.
+4. Everyone who wants to play presses **Link my account** in `#how-to-play` once (or runs
+   `/link Danman#NA1`). The bot shows them a profile icon to switch to in the League client
+   and a **Verify** button. That proves the account is theirs. Nobody can join a queue until
+   they have linked.
+5. **Already set up before this update?** Run `/admin setup` again to add `#leaderboard`, the
+   control panel and the guide buttons, and switch to captain draft only with:
+   `/admin modes pick_order:False balanced:False captain:True default:Captain draft`
 
-**Testing on your own:** open a lobby with `/inhouse create`, join it, then run `/admin testfill`
-to fill the other nine spots with fillers. Press **Start** to see teams made. For a captain
-draft, use `/inhouse create mode:Captain draft`, fill it, then `/inhouse captains` to make
-yourself one captain and a filler the other, and pick for both sides. `/admin testclear`
-cleans up afterwards.
+**Testing on your own:** press **Open lobby** on the control panel, join the lobby, then run
+`/admin testfill` to fill the other nine spots with fillers. Press **Accept** on the ready
+check (fillers accept by themselves) and the captain draft starts. Fillers can't pick, so as
+the host you pick for a filler captain from the dropdown; use **Set captains** on the panel to
+make yourself one of the captains. `/admin testclear` cleans up afterwards.
 
 To test that scoring works without playing a fresh game, find any past 10-player custom
 game and run `/admin submit` with the number from its post-game screen, for example

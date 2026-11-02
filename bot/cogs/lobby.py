@@ -11,7 +11,7 @@ from sqlalchemy import select
 from bot import config
 from bot.db.database import SessionLocal
 from bot.models.player import Player
-from bot.services import drafter_api, game_channel, lobby_manager, ready_check, settings
+from bot.services import drafter_api, game_channel, ladder, lobby_manager, ready_check, settings
 from bot.services.lobby_manager import LobbyError
 from bot.services.rating_engine import ROLES, ROLE_DISPLAY
 from bot.ui import embeds
@@ -106,6 +106,53 @@ class ReadyView(discord.ui.View):
 
 MENTION_USERS = discord.AllowedMentions(users=True, roles=False, everyone=False)
 
+ROLE_OPTIONS = [("FILL", "Fill (any role)")] + [(r, ROLE_DISPLAY[r]) for r in ROLES]
+
+
+class DraftView(discord.ui.View):
+    """The dropdown the captain on the clock picks from. Persistent, so it survives a restart."""
+
+    def __init__(self, cog: "LobbyCog", options: list[discord.SelectOption] | None = None):
+        super().__init__(timeout=None)
+        self.cog = cog
+        pick = discord.ui.Select(custom_id="draft:pick", placeholder="Captain: pick a player",
+                                 options=options or [discord.SelectOption(label="(no one left)", value="0")])
+        pick.callback = self._picked
+        self.add_item(pick)
+
+    async def _picked(self, inter: discord.Interaction):
+        await self.cog.handle_draft_pick(inter)
+
+
+class RoleView(discord.ui.View):
+    """Shown privately after joining: choose your main and second role. Remembered next time."""
+
+    def __init__(self, cog: "LobbyCog", lobby_id: int, pref: str | None, sec: str | None):
+        super().__init__(timeout=600)
+        self.cog, self.lobby_id, self.pref, self.sec = cog, lobby_id, pref, sec
+        for which, current in (("main", pref), ("second", sec)):
+            sel = discord.ui.Select(
+                placeholder="Main role" if which == "main" else "Second role",
+                options=[discord.SelectOption(label=f"{'Main' if which == 'main' else 'Second'}: {name}", value=v,
+                                              default=(v == (current or "FILL")))
+                         for v, name in ROLE_OPTIONS])
+            sel.callback = self._make_callback(which, sel)
+            self.add_item(sel)
+
+    def _make_callback(self, which: str, sel: discord.ui.Select):
+        async def callback(inter: discord.Interaction):
+            value = None if sel.values[0] == "FILL" else sel.values[0]
+            if which == "main":
+                self.pref = value
+            else:
+                self.sec = value
+            await self.cog.handle_role_choice(inter, self.lobby_id, self.pref, self.sec)
+        return callback
+
+
+def roles_line(pref: str | None, sec: str | None) -> str:
+    return embeds._roles_text(pref, sec)
+
 
 class LobbyCog(commands.Cog, name="Lobby"):
     def __init__(self, bot: commands.Bot):
@@ -114,6 +161,7 @@ class LobbyCog(commands.Cog, name="Lobby"):
     async def cog_load(self):
         self.bot.add_view(LobbyView(self))
         self.bot.add_view(ReadyView(self))
+        self.bot.add_view(DraftView(self))
         if config.READY_CHECK_ENABLED:
             self.ready_check_timeouts.start()
 
@@ -236,7 +284,15 @@ class LobbyCog(commands.Cog, name="Lobby"):
             if lobby.mode == "pick_order" and (role or secondary):
                 note = ("\nThis is a **pick order** lobby, so there is no role queue. You'll get a pick "
                         "position when teams are made, and roles are claimed in champ select in pick order.")
-            await inter.followup.send(f"You're in ({n}/{lobby.max_players}).{note}", ephemeral=True)
+            if lobby.mode == "pick_order":
+                await inter.followup.send(f"You're in ({n}/{lobby.max_players}).{note}", ephemeral=True)
+            else:
+                me_player = await session.scalar(select(Player).where(Player.discord_id == str(inter.user.id)))
+                me = next(lp for lp in lobby.players if lp.player_id == me_player.id)
+                await inter.followup.send(
+                    f"You're in ({n}/{lobby.max_players}). Your roles: **{roles_line(me.preferred_role, me.secondary_role)}**."
+                    f"\nCaptains see these when they pick. Change them below; they're remembered for next time.",
+                    view=RoleView(self, lobby.id, me.preferred_role, me.secondary_role), ephemeral=True)
             await self.refresh_lobby_message(session, lobby)
             await self.after_join(session, lobby)
 
@@ -278,17 +334,68 @@ class LobbyCog(commands.Cog, name="Lobby"):
             if len(lobby.players) < lobby.max_players:
                 await inter.followup.send(f"Not enough players ({len(lobby.players)}/{lobby.max_players}).")
                 return
-            if config.READY_CHECK_ENABLED and not await ready_check.everyone_accepted(session, lobby):
-                if ready_check.running(lobby):
-                    rows = await ready_check.rows(session, lobby)
-                    await inter.followup.send(
-                        f"Waiting on the ready check: {sum(r.accepted for r in rows)}/{len(rows)} accepted. "
-                        f"To swap out someone who's AFK, use `/inhouse forceremove`.", ephemeral=True)
-                else:
-                    await inter.followup.send("Everyone has to accept first. Starting a ready check.", ephemeral=True)
-                    await self.start_ready_check(session, lobby)
-                return
-            await self.start_lobby(session, lobby, inter.followup, random_captains)
+            note = await self.start_or_check(session, lobby, inter.followup, random_captains)
+            if note:
+                await inter.followup.send(note, ephemeral=True)
+
+    async def start_or_check(self, session, lobby, public, random_captains: bool = False) -> str | None:
+        """Start a full lobby, or run the ready check first. Returns a note for whoever asked."""
+        if config.READY_CHECK_ENABLED and not await ready_check.everyone_accepted(session, lobby):
+            if ready_check.running(lobby):
+                rows = await ready_check.rows(session, lobby)
+                return (f"Waiting on the ready check: {sum(r.accepted for r in rows)}/{len(rows)} accepted. "
+                        f"To swap out someone who's AFK, remove them from the queue.")
+            await self.start_ready_check(session, lobby)
+            return "Everyone has to accept first, so the ready check has started."
+        await self.start_lobby(session, lobby, public, random_captains)
+        return None
+
+    async def open_lobby(self, session, guild_id: str, channel, host, casual: bool = False):
+        """Open a lobby in `channel` with `host` as its host (used by the mod panel)."""
+        mode, err = settings.resolve_mode(None, await settings.allowed_modes(session, guild_id),
+                                          await settings.default_mode(session, guild_id))
+        if err:
+            raise LobbyError(err)
+        if casual and not await settings.casual_allowed(session, guild_id):
+            raise LobbyError("Casual lobbies are turned off on this server.")
+        lobby = await lobby_manager.create_lobby(session, guild_id, str(channel.id), str(host.id), mode,
+                                                 ranked=not casual)
+        msg = await channel.send(embed=embeds.lobby_embed(lobby, {}, host.mention), view=LobbyView(self))
+        lobby.message_id = str(msg.id)
+        await session.commit()
+        return lobby
+
+    async def record_game(self, session, guild_id: str, raw_id: str, by: str, lobby=None):
+        """Record a finished game by its ID. Returns (result, None) or (None, error text)."""
+        from bot.services.game_processor import process_match
+        from bot.services.riot_api import RiotAPIError, RiotUnavailable, friendly_error, normalize_match_id
+        try:
+            mid = normalize_match_id(raw_id)
+        except ValueError as e:
+            return None, str(e)
+        if lobby is None:
+            lobby = await session.scalar(select(lobby_manager.Lobby).where(
+                lobby_manager.Lobby.guild_id == guild_id, lobby_manager.Lobby.status == "active")
+                .order_by(lobby_manager.Lobby.id.desc()))
+        in_lobby = lobby is not None and lobby.status == "active"
+        try:
+            result = await process_match(session, mid, submitted_by=by, lobby_id=lobby.id if in_lobby else None,
+                                         ranked=lobby.ranked if in_lobby else True)
+        except ValueError as e:
+            return None, str(e)
+        except (RiotAPIError, RiotUnavailable) as e:
+            return None, friendly_error(e, context="match", match_id=mid)
+        if in_lobby and not result.remake:
+            await lobby_manager.complete_lobby(session, lobby)
+            await self.refresh_lobby_message(session, lobby)
+            await self.post_to_game(lobby, f"**Game recorded.** {cleanup_note()}", [embeds.results_embed(result)])
+        mod = self.bot.get_cog("Moderation")
+        if mod and result.smurf_flags:
+            await mod.post_flags(guild_id, result.smurf_flags)
+        ranking = self.bot.get_cog("Ranking")
+        if ranking:
+            await ranking.refresh_board(guild_id)
+        return result, None
 
     async def start_lobby(self, session, lobby, public, random_captains: bool = False):
         """Make teams (or start the captain draft) and tell everyone. `public` is where to post."""
@@ -488,19 +595,122 @@ class LobbyCog(commands.Cog, name="Lobby"):
         await self.bot.wait_until_ready()
 
     async def start_captain_space(self, session, lobby, cap1, cap2, public, header: str = "Captain draft!"):
-        """Captain draft begins: it happens in the private thread if there is one."""
-        text = (f"Blue captain: {_who(cap1)}\nRed captain: {_who(cap2)}\n\n"
-                f"{_who(cap1)} picks first with `/inhouse pick` (snake order 1-2-2-1-1-2-2-1). "
-                f"Not the captains you wanted? The host can run `/inhouse captains`.")
+        """Captain draft begins: the draft board goes in the private thread if there is one."""
+        text = (f"🔵 Blue captain: {_who(cap1)}\n🔴 Red captain: {_who(cap2)}\n"
+                f"The two highest on the leaderboard captain. {_who(cap1)} picks first, then it snakes "
+                f"(1-2-2-1-1-2-2-1). Pick from the dropdown on the draft board.")
         filler = "\nA filler captain can't pick, so the host or an admin picks for them." \
             if cap1.is_test or cap2.is_test else ""
+        content, embed, view = await self.draft_board(session, lobby)
         ch = await self.open_game_space(session, lobby)
+        target = ch
         if ch is not None:
             await self.post_to_game(lobby, f"{await self._mentions(session, lobby)}\n**{header}** "
                                            f"This thread is just for this lobby's players and staff.\n{text}{filler}")
             await public.send(f"**{header}** Lobby #{lobby.id}'s draft is happening in {ch.mention}.")
         else:
             await public.send(f"**{header}**\n{text}{filler}")
+            target = await self._queue_channel(lobby)
+        if target is None:
+            return
+        try:
+            board = await target.send(content, embed=embed, view=view, allowed_mentions=MENTION_USERS)
+        except discord.HTTPException as e:
+            log.warning("could not post draft board for lobby %s: %s", lobby.id, e)
+            return
+        lobby.draft_state = {**(lobby.draft_state or {}), "board": str(board.id), "board_channel": str(target.id)}
+        await session.commit()
+
+    async def draft_board(self, session, lobby):
+        """(content, embed, view) for the draft board as it stands."""
+        names = await _names(session, lobby)
+        place = await ladder.positions(session)
+        ratings = await lobby_manager.lobby_ratings(session, lobby)
+        tags = {lp.player_id: embeds.player_tag(place.get(lp.player_id), ratings[lp.player_id]["lp"],
+                                                lp.preferred_role, lp.secondary_role)
+                for lp in lobby.players}
+        nxt = lobby_manager.current_captain_id(lobby)
+        cap = await session.get(Player, nxt) if nxt else None
+        on_clock = None
+        if cap is not None:
+            on_clock = _who(cap) + (" (a filler: the host or an admin picks for them)" if cap.is_test else "")
+        embed = embeds.draft_embed(lobby, names, tags, on_clock)
+        if cap is None:
+            return "", embed, None
+        pool = (lobby.draft_state or {}).get("pool", [])
+        options = [discord.SelectOption(label=names.get(pid, "?")[:100], value=str(pid), description=tags[pid][:100])
+                   for pid in pool][:25]
+        return f"{_who(cap)}, you're on the clock.", embed, DraftView(self, options)
+
+    async def update_draft_board(self, session, lobby, inter: discord.Interaction | None = None):
+        """Redraw the board after a pick. Through the interaction when it came from the dropdown."""
+        content, embed, view = await self.draft_board(session, lobby)
+        try:
+            if inter is not None:
+                await inter.edit_original_response(content=content or None, embed=embed, view=view)
+                return
+            ds = lobby.draft_state or {}
+            ch = self.bot.get_channel(int(ds["board_channel"])) if ds.get("board_channel") else None
+            if ch is not None and ds.get("board"):
+                await ch.get_partial_message(int(ds["board"])).edit(content=content or None, embed=embed, view=view)
+        except discord.HTTPException as e:
+            log.warning("could not update draft board for lobby %s: %s", lobby.id, e)
+
+    async def handle_draft_pick(self, inter: discord.Interaction):
+        await inter.response.defer()
+        values = (inter.data or {}).get("values") or []
+        async with SessionLocal() as session:
+            lobby = None
+            for cand in (await session.execute(select(lobby_manager.Lobby).where(
+                    lobby_manager.Lobby.guild_id == str(inter.guild_id),
+                    lobby_manager.Lobby.status == "drafting"))).scalars().all():
+                if (cand.draft_state or {}).get("board") == str(inter.message.id):
+                    lobby = cand
+            if lobby is None or not values or not str(values[0]).isdigit():
+                await inter.followup.send("This draft is over.", ephemeral=True)
+                return
+            pid = int(values[0])
+            turn_cap = await session.get(Player, lobby_manager.current_captain_id(lobby))
+            try:
+                await lobby_manager.captain_pick(session, lobby, str(inter.user.id), pid, _is_admin(inter))
+            except LobbyError as e:
+                await inter.followup.send(str(e), ephemeral=True)
+                await self.update_draft_board(session, lobby, inter)     # reset the dropdown
+                return
+            await self.after_pick(session, lobby, pid, inter, turn_cap)
+
+    async def after_pick(self, session, lobby, pid: int, inter: discord.Interaction | None, turn_cap):
+        """Show the pick, and finish the draft when it was the last one."""
+        names = await _names(session, lobby)
+        by = "" if inter is None or (turn_cap and turn_cap.discord_id == str(inter.user.id)) else \
+            f" (picked by {inter.user.display_name} for them)"
+        side = "🔵" if next(lp.team for lp in lobby.players if lp.player_id == pid) == 1 else "🔴"
+        await self.update_draft_board(session, lobby, inter)
+        nxt = lobby_manager.current_captain_id(lobby)
+        nxt_cap = await session.get(Player, nxt) if nxt else None
+        up = f"\n{_who(nxt_cap)}, your pick." if nxt_cap is not None else ""
+        picker = turn_cap.discord_username if turn_cap else "?"
+        await self.post_to_game(lobby, f"{side} **{picker}** picked **{names[pid]}**{by}.{up}")
+        if lobby.status == "active":
+            await self.refresh_lobby_message(session, lobby)
+            await self.post_to_game(lobby, "**Draft complete!** Roles are suggested from everyone's preferences; "
+                                           "captains can move players with `/inhouse role`.")
+            await self.announce_teams(session, lobby, names)
+
+    async def handle_role_choice(self, inter: discord.Interaction, lobby_id: int, pref, sec):
+        async with SessionLocal() as session:
+            lobby = await session.get(lobby_manager.Lobby, lobby_id)
+            try:
+                if lobby is None:
+                    raise LobbyError("That lobby is gone.")
+                lp = await lobby_manager.set_preferences(session, lobby, str(inter.user.id), pref, sec)
+            except LobbyError as e:
+                await inter.response.edit_message(content=str(e), view=None)
+                return
+            await inter.response.edit_message(
+                content=f"Your roles: **{roles_line(lp.preferred_role, lp.secondary_role)}**. Remembered for next time.",
+                view=RoleView(self, lobby.id, lp.preferred_role, lp.secondary_role))
+            await self.refresh_lobby_message(session, lobby)
 
     async def announce_teams(self, session, lobby, names, public=None):
         """
@@ -681,21 +891,8 @@ class LobbyCog(commands.Cog, name="Lobby"):
             except LobbyError as e:
                 await inter.followup.send(str(e))
                 return
-            names = await _names(session, lobby)
-            on_behalf = "" if acting_cap and acting_cap.discord_id == str(inter.user.id) else \
-                f" for {_who(acting_cap)}"
-            if lobby.status == "active":
-                await self.refresh_lobby_message(session, lobby)
-                await inter.followup.send(f"Picked **{names[pid]}**{on_behalf}. **Draft complete!** Roles are "
-                                          f"suggestions from preferences; captains can move players with `/inhouse role`.")
-                await self.announce_teams(session, lobby, names)
-            else:
-                nxt = lobby_manager.current_captain_id(lobby)
-                cap = await session.get(Player, nxt) if nxt else None
-                pool = [names[p] for p in lobby.draft_state["pool"]]
-                note = " (a filler: the host picks for them)" if cap and cap.is_test else ""
-                await inter.followup.send(f"Picked **{names[pid]}**{on_behalf}. Available: {', '.join(pool)}\n"
-                                          f"{_who(cap)}{note}, your pick.")
+            await inter.followup.send(f"Picked **{(await _names(session, lobby))[pid]}**.")
+            await self.after_pick(session, lobby, pid, None, acting_cap)
 
     inhouse_pick.autocomplete("player")(_pool_autocomplete)
 
@@ -881,36 +1078,13 @@ class LobbyCog(commands.Cog, name="Lobby"):
         if await self._wrong_channel(inter):
             return
         await inter.response.defer()
-        from bot.services.game_processor import process_match
-        from bot.services.riot_api import RiotAPIError, RiotUnavailable, friendly_error, normalize_match_id
-        try:
-            mid = normalize_match_id(match_id)
-        except ValueError as e:
-            await inter.followup.send(str(e))
-            return
         async with SessionLocal() as session:
-            lobby = await self._lobby_here(session, inter)
-            try:
-                in_lobby = lobby is not None and lobby.status == "active"
-                result = await process_match(session, mid, submitted_by=inter.user.name,
-                                             lobby_id=lobby.id if in_lobby else None,
-                                             ranked=lobby.ranked if in_lobby else True)
-            except ValueError as e:
-                await inter.followup.send(str(e))
-                return
-            except (RiotAPIError, RiotUnavailable) as e:
-                await inter.followup.send(friendly_error(e, context="match", match_id=mid))
-                return
-            if lobby and lobby.status == "active" and not result.remake:
-                await lobby_manager.complete_lobby(session, lobby)
-                await self.refresh_lobby_message(session, lobby)
-                if inter.channel_id != (int(lobby.game_channel_id) if lobby.game_channel_id else None):
-                    await self.post_to_game(lobby, f"**Game recorded.** {cleanup_note()}",
-                                            [embeds.results_embed(result)])
+            here = await game_channel.lobby_for_channel(session, str(inter.guild_id), inter.channel_id)
+            result, err = await self.record_game(session, str(inter.guild_id), match_id, inter.user.name, here)
+        if err:
+            await inter.followup.send(err)
+            return
         await inter.followup.send(embed=embeds.results_embed(result))
-        mod = self.bot.get_cog("Moderation")
-        if mod and result.smurf_flags:
-            await mod.post_flags(str(inter.guild_id), result.smurf_flags)
 
 
 async def setup(bot: commands.Bot):

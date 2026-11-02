@@ -138,8 +138,11 @@ CHAT_PERSONA = os.getenv(
 LOBBY_SIZE = _int("LOBBY_SIZE", 10)
 # Which team-making modes hosts may open, and the one used when they do not pick.
 # Changeable in Discord with /admin modes; these are only the starting values.
-ALLOWED_MODES = [m.strip() for m in os.getenv("ALLOWED_MODES", "pick_order,balanced,captain").split(",") if m.strip()]
-DEFAULT_MODE = os.getenv("DEFAULT_MODE", "pick_order")
+ALLOWED_MODES = [m.strip() for m in os.getenv("ALLOWED_MODES", "captain").split(",") if m.strip()]
+DEFAULT_MODE = os.getenv("DEFAULT_MODE", "captain")
+# Captain draft: the two highest on the leaderboard captain. "lower" gives the first pick to the
+# lower-ranked of the two (evens things out); "higher" gives it to the higher-ranked.
+CAPTAIN_FIRST_PICK = os.getenv("CAPTAIN_FIRST_PICK", "lower").strip().lower()
 CASUAL_ALLOWED = _bool("CASUAL_ALLOWED", True)
 # When a lobby fills, everyone must press Accept (like League's queue pop) before it starts.
 READY_CHECK_ENABLED = _bool("READY_CHECK_ENABLED", True)
@@ -162,7 +165,13 @@ AUTO_DETECT_MIN_LOBBY_PLAYERS = _int("AUTO_DETECT_MIN_LOBBY_PLAYERS", 8)
 AUTO_DETECT_MAX_AGE_HOURS = _int("AUTO_DETECT_MAX_AGE_HOURS", 6)
 
 # --- Ranking ---------------------------------------------------------------
-CURRENT_SEASON = _int("CURRENT_SEASON", 1)
+CURRENT_SEASON = _int("CURRENT_SEASON", 1)   # replaced at startup by the season saved in the database
+ENV_SEASON = CURRENT_SEASON
+# New season: LP goes back to STARTING_LP and placements start again, but this share of the
+# hidden rating (MMR) is kept, so teams stay fair from game one. 0 = full reset, 1 = keep it all.
+SEASON_CARRYOVER = _float("SEASON_CARRYOVER", 0.5)
+SEASON_RESET_RD = _float("SEASON_RESET_RD", 250.0)       # rating uncertainty at season start
+LEADERBOARD_SIZE = _int("LEADERBOARD_SIZE", 20)          # players shown in the #leaderboard channel
 STARTING_LP = _int("STARTING_LP", 1000)
 STARTING_MMR = _float("STARTING_MMR", 1500.0)
 STARTING_RD = _float("STARTING_RD", 350.0)

@@ -74,9 +74,21 @@ async def get_or_create_rating(session: AsyncSession, player_id: int, role: str,
         )
     )
     if r is None:
+        mmr, rd = config.STARTING_MMR, config.STARTING_RD
+        prev = await session.scalar(
+            select(PlayerRating).where(
+                PlayerRating.player_id == player_id, PlayerRating.role == role,
+                PlayerRating.season < season, PlayerRating.games_played > 0,
+            ).order_by(PlayerRating.season.desc()).limit(1)
+        )
+        if prev is not None:
+            # Soft reset: LP and placements start over, but part of the hidden rating carries,
+            # so team balance and captain choice are sensible from the first game of a season.
+            mmr = config.STARTING_MMR + (prev.mmr - config.STARTING_MMR) * config.SEASON_CARRYOVER
+            rd = min(config.STARTING_RD, max(prev.rd, config.SEASON_RESET_RD))
         r = PlayerRating(
             player_id=player_id, role=role, season=season,
-            lp=config.STARTING_LP, mmr=config.STARTING_MMR, rd=config.STARTING_RD,
+            lp=config.STARTING_LP, mmr=mmr, rd=rd,
             peak_lp=config.STARTING_LP,
         )
         session.add(r)
@@ -132,7 +144,14 @@ async def load_baselines(session: AsyncSession, season: int) -> dict[str, tuple[
     for role in re_.ROLES:
         row = await session.scalar(select(RoleBaseline).where(RoleBaseline.role == role, RoleBaseline.season == season))
         if row is None:
-            row = RoleBaseline(role=role, season=season, stats=None, sample_size=0)
+            # A new season keeps the community's role averages from the last one, so performance
+            # scores don't start from guesses.
+            prev = await session.scalar(select(RoleBaseline).where(
+                RoleBaseline.role == role, RoleBaseline.season < season, RoleBaseline.sample_size > 0)
+                .order_by(RoleBaseline.season.desc()).limit(1))
+            carried = prev is not None and bool(prev.stats)
+            row = RoleBaseline(role=role, season=season, stats=dict(prev.stats) if carried else None,
+                               sample_size=prev.sample_size if carried else 0)
             session.add(row)
             await session.flush()
         out[role] = (row, re_.Baseline.from_dict(row.stats, role))

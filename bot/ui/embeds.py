@@ -93,6 +93,67 @@ def ready_embed(lobby: Lobby, rows: list, outcome: str | None = None, note: str 
     return e
 
 
+def _roles_text(pref: str | None, sec: str | None) -> str:
+    if not pref and not sec:
+        return "Fill"
+    return " / ".join(ROLE_DISPLAY.get(r, r) for r in (pref, sec) if r)
+
+
+def player_tag(place: int | None, lp: int | None, pref: str | None, sec: str | None) -> str:
+    """One line about a player for draft choices: ladder place, LP, roles."""
+    where = f"#{place} on the ladder · {lp} LP" if place else "Not ranked yet"
+    return f"{where} · {_roles_text(pref, sec)}"
+
+
+def draft_embed(lobby: Lobby, names: dict[int, str], tags: dict[int, str],
+                on_clock: str | None) -> discord.Embed:
+    """The captain draft board: both teams so far, who's picking, and who's left."""
+    ds = lobby.draft_state or {}
+    order = ds.get("pick_order", [])
+    made = ds.get("picks_made", 0)
+    e = discord.Embed(title=f"Captain draft (Lobby #{lobby.id})", color=discord.Color.blurple())
+    if on_clock:
+        left = order[made:]
+        snake = " ".join("🔵" if t == 1 else "🔴" for t in left)
+        e.description = f"**On the clock:** {on_clock}\nPick from the dropdown below.\nPicks left: {snake}"
+    else:
+        e.description = "**Draft complete.**"
+    for team, cap_id, label in ((1, lobby.captain1_id, "🔵 Blue"), (2, lobby.captain2_id, "🔴 Red")):
+        picked = sorted((lp for lp in lobby.players if lp.team == team and lp.player_id != cap_id),
+                        key=lambda lp: lp.pick_order if lp.pick_order is not None else 99)
+        lines = [f"👑 **{names.get(cap_id, '?')}** (captain)"] + [f"{names.get(lp.player_id, '?')}" for lp in picked]
+        e.add_field(name=label, value="\n".join(lines), inline=True)
+    pool = ds.get("pool", [])
+    if pool:
+        e.add_field(name="Still available", value="\n".join(
+            f"**{names.get(pid, '?')}**: {tags.get(pid, '')}" for pid in pool)[:1024], inline=False)
+    return e
+
+
+def leaderboard_embed(rows: list, season: int, final: bool = False) -> discord.Embed:
+    """The #leaderboard post. rows = [(PlayerRating, Player)] in ladder order."""
+    title = f"Season {season} final standings" if final else f"Leaderboard: Season {season}"
+    e = discord.Embed(title=title, color=discord.Color.gold() if not final else discord.Color.dark_gold())
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines = []
+    for i, (r, p) in enumerate(rows, 1):
+        _, emoji = tier_for_lp(r.lp)
+        losses = r.games_played - r.wins
+        wr = r.wins / r.games_played * 100 if r.games_played else 0
+        plc = " ⏳" if r.games_played < config.PLACEMENT_GAMES else ""
+        fire = f" 🔥{r.streak}" if (r.streak or 0) >= 3 else ""
+        # A mention in a description shows the name and never pings.
+        who = f"<@{p.discord_id}>" if p.discord_id.isdigit() else f"**{p.discord_username}**"
+        lines.append(f"{medals.get(i, f'`{i:>2}.`')} {emoji} {who} **{r.lp} LP** {division_for_lp(r.lp)} · "
+                     f"{r.wins}W {losses}L ({wr:.0f}%){fire}{plc}")
+    e.description = "\n".join(lines) if lines else "Nobody has played a ranked game this season yet."
+    if final:
+        e.set_footer(text="Final standings. A new season has started.")
+    else:
+        e.set_footer(text="⏳ still in placements · 🔥 win streak · Updates after every game")
+    return e
+
+
 def teams_embed(lobby: Lobby, names: dict[int, str], ratings: dict[int, dict] | None = None) -> discord.Embed:
     t1 = [lp for lp in lobby.players if lp.team == 1]
     t2 = [lp for lp in lobby.players if lp.team == 2]
@@ -204,7 +265,12 @@ def flag_embed(flag, player_name: str, matched_name: str | None) -> discord.Embe
     if ev:
         lines = [f"{k}: {v}" for k, v in ev.items() if k != "same_game"][:10]
         e.add_field(name="Evidence", value="\n".join(lines) or "—", inline=False)
-    e.set_footer(text="Resolve with /flags resolve <id> confirmed|dismissed")
+    status = getattr(flag, "status", "open")
+    if status == "open":
+        e.set_footer(text="Press Confirmed smurf or False alarm below.")
+    else:
+        e.color = discord.Color.dark_grey()
+        e.add_field(name="Resolved", value=f"**{status}** by {flag.resolved_by or '?'}", inline=False)
     return e
 
 

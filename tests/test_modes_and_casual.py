@@ -28,15 +28,15 @@ def test_resolve_mode():
 
 async def test_mode_settings_roundtrip(db):
     async with db() as s:
-        assert await settings.default_mode(s, "g") == "pick_order"
-        assert await settings.allowed_modes(s, "g") == ["pick_order", "balanced", "captain"]
+        assert await settings.default_mode(s, "g") == "captain"                 # captain draft only, by default
+        assert await settings.allowed_modes(s, "g") == ["captain"]
         assert await settings.casual_allowed(s, "g") is True
         await settings.set_setting(s, "g", settings.KEY_ALLOWED_MODES, "pick_order")
         await settings.set_setting(s, "g", settings.KEY_CASUAL_ALLOWED, "0")
         assert await settings.allowed_modes(s, "g") == ["pick_order"]
         assert await settings.casual_allowed(s, "g") is False
         await settings.set_setting(s, "g", settings.KEY_ALLOWED_MODES, "nonsense")
-        assert await settings.allowed_modes(s, "g") == ["pick_order"]           # never empty
+        assert await settings.allowed_modes(s, "g") == ["captain"]              # never empty
 
 
 # --------------------------------------------------------------------------- #

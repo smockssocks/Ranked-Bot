@@ -11,8 +11,9 @@ Modes
               Pick positions rotate: whoever has had late picks recently gets early ones.
   balanced    the bot searches all 126 team splits for the smallest MMR gap and best
               fit to stated role preferences (role queue).
-  captain     two captains (highest MMR by default) snake-draft players, then roles are
-              auto-suggested from preferences and captains can reassign with /inhouse role.
+  captain     The default. The two players highest on the season leaderboard captain and
+              snake-draft the rest; the lower-ranked captain picks first (CAPTAIN_FIRST_PICK).
+              Roles are suggested from preferences and captains can reassign with /inhouse role.
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ from bot import config
 from bot.models.lobby import Lobby, LobbyPlayer
 from bot.models.player import Player
 from bot.models.rating import PlayerRating
-from bot.services import bans, ready_check
+from bot.services import bans, ladder, ready_check
 from bot.services.rating_engine import ROLES, normalize_role, ROLE_DISPLAY
 
 log = logging.getLogger("ranked-bot.lobby")
@@ -114,6 +115,8 @@ async def queue_player(session: AsyncSession, lobby: Lobby, discord_id: str,
     if lobby.mode == "pick_order":
         # No role queue: roles are claimed in champ select by pick position.
         preferred_role = secondary_role = None
+    elif preferred_role is None and secondary_role is None:
+        preferred_role, secondary_role = await last_roles(session, p.id)
     pref = normalize_role(preferred_role) if preferred_role else None
     sec = normalize_role(secondary_role) if secondary_role else None
     lp = LobbyPlayer(lobby_id=lobby.id, player_id=p.id, preferred_role=pref, secondary_role=sec,
@@ -121,6 +124,33 @@ async def queue_player(session: AsyncSession, lobby: Lobby, discord_id: str,
     session.add(lp)
     await session.commit()
     await session.refresh(lobby)
+    return lp
+
+
+async def last_roles(session: AsyncSession, player_id: int) -> tuple[str | None, str | None]:
+    """The roles a player asked for last time, so they only have to choose once."""
+    lp = await session.scalar(select(LobbyPlayer).where(
+        LobbyPlayer.player_id == player_id,
+        (LobbyPlayer.preferred_role.is_not(None)) | (LobbyPlayer.secondary_role.is_not(None)))
+        .order_by(LobbyPlayer.id.desc()).limit(1))
+    return (lp.preferred_role, lp.secondary_role) if lp else (None, None)
+
+
+async def set_preferences(session: AsyncSession, lobby: Lobby, discord_id: str,
+                          preferred_role: str | None, secondary_role: str | None) -> LobbyPlayer:
+    """Change a queued player's role preferences. None means fill (any role)."""
+    p = await session.scalar(select(Player).where(Player.discord_id == discord_id))
+    lp = next((x for x in lobby.players if p is not None and x.player_id == p.id), None)
+    if lp is None:
+        raise LobbyError("You're not in this lobby.")
+    if lobby.status not in ("waiting", "drafting"):
+        raise LobbyError("Teams are already set.")
+    pref = normalize_role(preferred_role) if preferred_role else None
+    sec = normalize_role(secondary_role) if secondary_role else None
+    if pref and sec == pref:
+        sec = None
+    lp.preferred_role, lp.secondary_role = pref, sec
+    await session.commit()
     return lp
 
 
@@ -489,7 +519,6 @@ async def start_captain_draft(session: AsyncSession, lobby: Lobby, random_captai
     """captain_ids = (blue captain, red captain) as player IDs, when chosen by a host or admin."""
     if len(lobby.players) < lobby.max_players:
         raise LobbyError(f"Need {lobby.max_players} players to start the draft.")
-    ratings = await lobby_ratings(session, lobby)
     ids = [lp.player_id for lp in lobby.players]
     if captain_ids is not None:
         cap1_id, cap2_id = captain_ids
@@ -497,10 +526,10 @@ async def start_captain_draft(session: AsyncSession, lobby: Lobby, random_captai
         random.shuffle(ids)
         cap1_id, cap2_id = ids[0], ids[1]
     else:
-        ordered = sorted(ids, key=lambda pid: ratings[pid]["mmr"], reverse=True)
-        cap1_id, cap2_id = ordered[0], ordered[1]
-        if random.random() < 0.5:
-            cap1_id, cap2_id = cap2_id, cap1_id
+        # The two highest on the leaderboard. Captain 1 is Blue and picks first.
+        ordered = await ladder.ladder_order(session, ids)
+        top, second = ordered[0], ordered[1]
+        cap1_id, cap2_id = (second, top) if config.CAPTAIN_FIRST_PICK != "higher" else (top, second)
     lobby.captain1_id, lobby.captain2_id = cap1_id, cap2_id
     lobby.status = "drafting"
     pool = [pid for pid in ids if pid not in (cap1_id, cap2_id)]

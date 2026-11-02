@@ -69,6 +69,9 @@ LAYOUT: tuple[Spec, ...] = (
     Spec("match_results", "match-results", "text", "readonly", "cat_inhouse",
          "Results and LP changes, posted automatically",
          topic="Results and LP changes, posted automatically after every game."),
+    Spec("leaderboard", "leaderboard", "text", "readonly", "cat_inhouse",
+         "The season's top players, updated after every game",
+         topic="The season's top players. Updates by itself after every game."),
     Spec("vc_lobby", "Lobby", "voice", "public", "cat_inhouse", "Voice while the lobby fills"),
     Spec("vc_blue", "Blue Side", "voice", "public", "cat_inhouse", "Blue team voice, 5 max", user_limit=5),
     Spec("vc_red", "Red Side", "voice", "public", "cat_inhouse", "Red team voice, 5 max", user_limit=5),
@@ -76,8 +79,8 @@ LAYOUT: tuple[Spec, ...] = (
     Spec("cat_staff", "STAFF", "category", "staff", None, "Hidden from players"),
     Spec("mod_flags", "mod-flags", "text", "staff", "cat_staff", "Anti-smurf flags for mods",
          topic="Anti-smurf flags. Review with /flags show, resolve with /flags resolve."),
-    Spec("bot_admin", "bot-admin", "text", "staff", "cat_staff", "Run /admin commands out of sight",
-         topic="Run /admin commands here to keep them out of public channels."),
+    Spec("bot_admin", "bot-admin", "text", "staff", "cat_staff", "The mod control panel, and /admin commands",
+         topic="The control panel's buttons run lobbies, bans and games. /admin commands work here too."),
 )
 
 # Which bot setting each channel is wired to.
@@ -85,6 +88,7 @@ SETTINGS_WIRING: dict[str, tuple[str, str]] = {
     "inhouse_queue": (settings.KEY_QUEUE_CHANNEL, "Queue channel"),
     "match_results": (settings.KEY_RESULTS_CHANNEL, "Results channel"),
     "mod_flags": (settings.KEY_MOD_CHANNEL, "Mod alerts channel"),
+    "leaderboard": (settings.KEY_LEADERBOARD_CHANNEL, "Leaderboard channel"),
 }
 
 
@@ -262,6 +266,7 @@ class Report:
     failed: list[tuple[str, str]] = field(default_factory=list)
     settings: list[str] = field(default_factory=list)
     guide: str | None = None
+    made: dict = field(default_factory=dict)     # spec key -> channel, for posting panels afterwards
     role_mention: str | None = None
 
 
@@ -273,7 +278,7 @@ def _why(e: Exception) -> str:
     return str(e)
 
 
-async def build(guild: Any, session: AsyncSession) -> Report:
+async def build(guild: Any, session: AsyncSession, guide_view: Any | None = None) -> Report:
     gid = str(guild.id)
     have = guild.me.guild_permissions
     p = await plan(guild, session)
@@ -283,7 +288,8 @@ async def build(guild: Any, session: AsyncSession) -> Report:
     role = p.role
     if role is None:
         try:
-            # Manage Threads lets mods see every private game thread.
+            # Manage Messages lets mods use the control panel and queue bans; Manage Threads lets
+            # them see every private game thread.
             perms = discord.Permissions(manage_messages=bool(have.manage_messages or have.administrator),
                                         manage_threads=bool(have.manage_threads or have.administrator))
             role = await guild.create_role(name=MOD_ROLE_NAME, permissions=perms, mentionable=False, reason=REASON)
@@ -343,19 +349,21 @@ async def build(guild: Any, session: AsyncSession) -> Report:
     htp = made.get("how_to_play")
     if htp is not None:
         queue, chat = made.get("inhouse_queue"), made.get("inhouse_chat")
-        text = how_to_play(queue.id if queue else None, chat.id if chat else None)
+        mode = await settings.default_mode(session, gid)
+        text = how_to_play(queue.id if queue else None, chat.id if chat else None, mode)
+        extra = {"view": guide_view} if guide_view is not None else {}
         msg = None
         mid = await _remembered(session, gid, "guide_message")
         if mid:
             try:
                 msg = await htp.fetch_message(mid)
-                await msg.edit(content=text)
+                await msg.edit(content=text, **extra)
                 report.guide = f"Guide in #{htp.name} updated"
             except discord.HTTPException:
                 msg = None
         if msg is None:
             try:
-                msg = await htp.send(text)
+                msg = await htp.send(text, **extra)
                 await _remember(session, gid, "guide_message", msg.id)
                 try:
                     await msg.pin(reason=REASON)
@@ -367,4 +375,5 @@ async def build(guild: Any, session: AsyncSession) -> Report:
 
     log.info("setup in guild %s: %d created, %d reused, %d failed",
              gid, len(report.created), len(report.reused), len(report.failed))
+    report.made = made
     return report

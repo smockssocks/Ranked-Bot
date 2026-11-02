@@ -8,40 +8,30 @@ Two things here. **Part 1** is a message to paste into Discord for your players.
 ## Part 1: paste this into your server
 
 `/admin setup` posts and pins this for you in `#how-to-play`, with a clickable link to your
-queue channel. If you'd rather post it yourself, it fits in one Discord message; replace
+queue channel and the **Link my account**, **My rank** and **My last game** buttons it
+mentions. If you'd rather post it yourself, it fits in one Discord message; replace
 `#inhouse-queue` with your actual queue channel.
 
 ```
 **How to play inhouses** :trophy:
 
 **1. Link your account (once)**
-Run `/link` with your full Riot ID, for example:
-`/link Danman#NA1`
-That is the name and tag exactly as they appear in the League client. The bot asks you to switch your profile icon once to prove it's your account. You cannot join a queue until you do this.
+Press **Link my account** below and type your Riot ID exactly as the League client shows it, like `Danman#NA1`. You'll switch your profile icon once to prove it's yours. You can't queue until you're linked.
 
 **2. Join the queue**
 All queues happen in #inhouse-queue.
-When a lobby is open, press the green **Join** button.
-Changed your mind? Press **Leave** or run `/dequeue`.
+When a lobby is open, press **Join** and pick your main and second role (remembered for next time). Changed your mind? Press **Leave**.
 
-**3. Get your pick**
-At 10 players everyone is pinged with **Accept** and **Decline** buttons, and the message shows who has accepted as it happens. Decline, leave, or don't answer in time and you're out of the lobby and can't queue for 3 minutes; everyone else keeps their spot. Once all 10 accept, the bot makes fair teams and gives you a **pick position, 1 to 5**.
-**There is no role queue.** In champ select, Pick 1 calls their role first, then Pick 2, and so on. Line up in the custom lobby in pick order.
-Picks rotate: a late pick now means an early pick soon.
+**3. Accept, then get drafted**
+At 10 players you're pinged to press **Accept** (declining means a short queue timeout). The two players highest on the leaderboard become captains and pick teams from a dropdown, snake style. Captains see everyone's rank and roles, so set yours when you join.
+You get a **private thread for your game** with how to get in, and your team gets its own voice channel.
 
 **4. Play**
-Join the custom game and play. **You do not report anything.** The bot finds the game and posts everyone's LP within a couple of minutes.
+Join the custom game and play. **You don't report anything.** The bot finds the game and posts everyone's LP within a couple of minutes.
 
-**Why no role queue?**
-This server ranks all-round skill. You're always judged against the average for the role you actually played, so a great support game counts as much as a great mid game. Players who are good at every role climb highest.
-
-**Check your rank**
-`/rank` tier, LP, and how you do in each role
-`/explain` exactly why your last game gained or lost LP
-`/leaderboard` the ladder, or `sort:Versatility` for all-round skill
-`/howranked` how it all works
-
-Winning matters most, but how you played counts too. Your first 5 games are placements and move faster.
+**Your rank**
+Winning matters most, but how you played counts too, judged against everyone else who played your role. Your first 5 games are placements and move faster.
+Press **My rank** or **My last game** below, check the leaderboard channel, or use `/rank`, `/explain` and `/leaderboard`.
 
 Stuck? Run `/help` any time.
 ```
@@ -54,8 +44,8 @@ Stuck? Run `/help` any time.
 
 | Step | Command | Notes |
 | --- | --- | --- |
-| Link | `/link Danman#NA1` | Once, ever. Blocks queueing until done. |
-| Join | **Join** button, or `/queue` | Role preferences only apply in balanced and captain lobbies. |
+| Link | **Link my account** button, or `/link Danman#NA1` | Once, ever. Blocks queueing until done. |
+| Join | **Join** button, or `/queue` | Then choose main and second role (or Fill) from the dropdowns. Remembered. |
 | Leave | **Leave** button, or `/dequeue` | Only while the lobby is still filling. |
 | Play | nothing | Results are detected automatically. |
 | Check | `/rank`, `/history`, `/explain` | `/explain` is the one that stops arguments. |
@@ -95,61 +85,61 @@ which is useful if your queue channel gets chatty.
 
 ### Choosing which modes exist
 
-Pick order is the default. It is the mode that makes your ladder measure all-round skill,
-because players regularly end up off their main role and are scored against the average for
-whatever role they actually played. In testing with the real rating engine, a one-trick
-ranks far above an all-rounder under role queue, and far below them under pick order.
+**Captain draft** is the default and the only mode switched on out of the box. The two players
+highest on the season leaderboard captain, the lower-ranked of them picks first, and they pick
+from a dropdown that shows each player's ladder place, LP and preferred roles.
 
 See or change what hosts are allowed to open:
 
 ```
 /admin modes
-/admin modes balanced:False captain:False     <- pick order only
+/admin modes pick_order:False balanced:False captain:True default:Captain draft   <- captain only
 /admin modes casual:False                     <- every game is ranked
 ```
 
 | Mode | How teams are made | Roles |
 | --- | --- | --- |
-| **Pick order** (default) | Fairest split by rating | Claimed in champ select by pick position. Positions rotate fairly. |
+| **Captain draft** (default) | The top two on the leaderboard pick players | Suggested from preferences; captains can move people |
+| Pick order | Fairest split by rating | Claimed in champ select by pick position |
 | Balanced | Fairest split by rating and role preference | Assigned from preferences (role queue) |
-| Captain draft | Two captains pick players | Captains set them |
 
 **Casual lobbies** post results and stats but change nobody's LP. Use them for joke games,
 practice, or teaching a newcomer. Hosts open one with `/inhouse create casual:True`.
 
 ### Running a game night as host
 
-1. In the queue channel, run `/inhouse create`. It uses your default mode.
-   Add `casual:True` if tonight shouldn't count.
+Mods run game nights from the **control panel** in #bot-admin (run `/panel` there if it's
+missing). Every button answers privately.
+
+1. Press **Open lobby** (or **Open casual lobby** if tonight shouldn't count). The lobby appears
+   in the queue channel with you as host. `/inhouse create` does the same.
 2. Wait for 10. When the lobby fills, the bot pings all ten players to **Accept**. The
    message updates live as people accept. Anyone who declines or doesn't answer in time
    (90 seconds) is removed with a 3-minute queue timeout, and the queue reopens for their
-   spot. Someone AFK? `/inhouse forceremove` them; that calls off the check without a timeout.
-3. When all ten accept, the lobby starts by itself. The bot opens a private thread under the queue channel, named after you
-   (e.g. "Dan's inhouse"), for the ten players and staff. It has the teams, pick positions,
-   the tournament code (or lobby name and password, and who creates the lobby). Each team
-   also gets its own voice channel, and players already in voice are moved in. The thread
+   spot. Someone AFK? **Remove player** on the panel; that calls off the check without a timeout.
+3. When all ten accept, the draft starts by itself. The top two on the leaderboard captain,
+   and the draft board with its dropdown appears in a private thread under the queue channel,
+   named after you (e.g. "Dan's inhouse"). Want different captains? **Set captains** on the panel.
+4. When the draft is done, the thread gets the teams and the tournament code (or lobby name
+   and password, and who creates the lobby). Each team gets its own voice channel, and players
+   already in voice are moved in.
+5. Play. The bot posts results, updates #leaderboard and closes the lobby by itself. The thread
    closes and the voice channels go away a little while after the game.
-4. Create the custom lobby in the League client, **Tournament Draft**, and have players
-   take their slots in pick order, top slot first.
-5. Play. The bot posts results and closes the lobby by itself.
 
-In a captain draft, `/inhouse captains` lets you choose both captains instead of the bot. If a
-captain goes AFK, you can make their picks with `/inhouse pick`, unless you are the other captain.
+If a captain goes AFK, the host or an admin can pick from the dropdown for them, unless they
+are the other captain.
 
-Testing on your own? `/admin testfill` fills the lobby with filler players and `/admin testclear`
-removes them afterwards.
+Testing on your own? `/admin testfill` fills the lobby with filler players (they accept the
+ready check by themselves) and `/admin testclear` removes them afterwards.
 
-Someone not at their keyboard? `/inhouse forcequeue @player` adds them for you, and
-`/inhouse forceremove @player` takes out someone who went AFK. Both work while the lobby is
-filling, for the host or an admin.
-
-If the bot somehow misses a game, run `/inhouse submit` in the queue channel with the game ID
-from the post-game screen, for example `/inhouse submit 5650481942`. Just the number is fine.
+If the bot somehow misses a game, press **Submit game** and type the game ID from the
+post-game screen, for example `5650481942`. **Undo a game** takes one back.
 
 ### Banning someone from inhouses
 
-Moderators can stop a player queueing for a while without kicking them from the server:
+Moderators can stop a player queueing for a while without kicking them from the server. On
+the control panel: **Queue ban** (choose the member, then type the length and reason) and
+**Lift ban**. Or with commands:
 
 ```
 /queueban add @player 3d Leaving games early
@@ -168,14 +158,14 @@ the ban is logged in your mod channel. It ends on its own when the time is up.
 Tell them to run `/explain`. It shows the exact stats that helped and hurt, and the numbers
 behind their LP change.
 
-**"Why did I get last pick again?"**
-Picks rotate based on the last 20 pick order games. If they had late picks recently, they're
-first in line for early ones. Over a few nights it evens out for everyone.
+**"Why am I always / never a captain?"**
+Captains are the two highest on the season leaderboard among the ten in the lobby. Climb the
+ladder and you'll captain. A mod can choose different captains with **Set captains**.
 
 **"I got stuck on a role I don't play."**
-That's the point of pick order. They're judged against the average for that role, not against
-their main, so a decent off-role game is not punished. Their `/rank` shows how they do in
-each role, and getting better at their weak ones is how they climb.
+They're judged against the average for the role they actually played, not against their main,
+so a decent off-role game is not punished. Setting their roles when they join helps the
+captain place them.
 
 **"Why am I not gaining much for winning?"**
 They were favoured, or they were carried. Both reduce the gain.

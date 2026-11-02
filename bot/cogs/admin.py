@@ -83,11 +83,66 @@ def setup_report_embed(r: server_setup.Report) -> discord.Embed:
     steps = [
         f"Give your moderators the {r.role_mention or '@Inhouse Mod'} role so they can see the STAFF channels and use /flags.",
         "Drag the categories into whatever order you like. Renaming channels is fine.",
-        "Run /admin modes to choose which lobby modes hosts can open.",
+        "Mods run game nights from the control panel in #bot-admin. Lost it? Run /panel there.",
         "Running /admin setup again only adds what is missing. A channel you delete will come back.",
     ]
     e.add_field(name="Next", value="\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1)), inline=False)
     return e
+
+
+async def post_extras(bot, guild, report: server_setup.Report) -> None:
+    """After setup: the control panel in #bot-admin and the live top-N in #leaderboard."""
+    gid = str(guild.id)
+    panel_ch = report.made.get("bot_admin")
+    panel = bot.get_cog("Panel")
+    if panel_ch is not None and panel is not None:
+        try:
+            report.settings.append(await panel.post_panel(gid, panel_ch))
+        except discord.HTTPException as e:
+            report.failed.append((f"Control panel in #{panel_ch.name}", server_setup._why(e)))
+    ranking = bot.get_cog("Ranking")
+    if report.made.get("leaderboard") is not None and ranking is not None:
+        report.settings.append(await ranking.refresh_board(gid, force=True))
+
+
+class LinkModal(discord.ui.Modal, title="Link your Riot account"):
+    riot_id = discord.ui.TextInput(label="Riot ID with tag", placeholder="Danman#NA1", max_length=40)
+
+    def __init__(self, cog: "AdminCog"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, inter: discord.Interaction):
+        await self.cog.start_link(inter, str(self.riot_id))
+
+
+class GuideView(discord.ui.View):
+    """Buttons under the how-to-play guide, so players never need to type a command. Persistent."""
+
+    def __init__(self, cog: "AdminCog"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Link my account", emoji="🔗", style=discord.ButtonStyle.success, custom_id="guide:link")
+    async def link(self, inter: discord.Interaction, _b: discord.ui.Button):
+        await inter.response.send_modal(LinkModal(self.cog))
+
+    @discord.ui.button(label="My rank", emoji="📊", style=discord.ButtonStyle.primary, custom_id="guide:rank")
+    async def rank(self, inter: discord.Interaction, _b: discord.ui.Button):
+        await self._ranking(inter, "rank")
+
+    @discord.ui.button(label="My last game", emoji="🔎", style=discord.ButtonStyle.secondary, custom_id="guide:last")
+    async def last(self, inter: discord.Interaction, _b: discord.ui.Button):
+        await self._ranking(inter, "last")
+
+    async def _ranking(self, inter: discord.Interaction, what: str):
+        await inter.response.defer(ephemeral=True)
+        ranking = inter.client.get_cog("Ranking")
+        embed, msg = await (ranking.rank_for(inter.user) if what == "rank" else ranking.explain_for(inter.user, 0))
+        if embed is None:
+            await inter.followup.send(msg, ephemeral=True)
+        else:
+            await inter.followup.send(embed=embed, ephemeral=True)
 
 
 class SetupConfirmView(discord.ui.View):
@@ -108,9 +163,12 @@ class SetupConfirmView(discord.ui.View):
         self.stop()
         await inter.response.edit_message(content="Building your server. This takes a few seconds...",
                                           embed=None, view=None)
+        admin_cog = inter.client.get_cog("Admin")
         try:
             async with SessionLocal() as session:
-                report = await server_setup.build(inter.guild, session)
+                report = await server_setup.build(inter.guild, session,
+                                                  guide_view=GuideView(admin_cog) if admin_cog else None)
+            await post_extras(inter.client, inter.guild, report)
         except Exception:
             log.exception("server setup failed")
             await inter.edit_original_response(
@@ -149,6 +207,12 @@ class AdminCog(commands.Cog, name="Admin"):
 
     async def cog_load(self):
         self.bot.add_view(LinkVerifyView(self))
+        self.bot.add_view(GuideView(self))
+
+    async def _refresh_board(self, guild_id) -> None:
+        ranking = self.bot.get_cog("Ranking")
+        if ranking and guild_id:
+            await ranking.refresh_board(str(guild_id))
 
     async def _notify_mods(self, guild_id: str, text: str) -> None:
         async with SessionLocal() as session:
@@ -164,6 +228,10 @@ class AdminCog(commands.Cog, name="Admin"):
     @app_commands.command(name="link", description="Link your Riot account (GameName#TAG). You'll prove it's yours.")
     @app_commands.describe(riot_id="Your Riot ID with tag, exactly as in the League client, e.g. Danman#NA1")
     async def link(self, inter: discord.Interaction, riot_id: str):
+        await self.start_link(inter, riot_id)
+
+    async def start_link(self, inter: discord.Interaction, riot_id: str):
+        """Begin linking: /link and the Link my account button."""
         await inter.response.defer(ephemeral=True)
         async with SessionLocal() as session:
             try:
@@ -269,6 +337,7 @@ class AdminCog(commands.Cog, name="Admin"):
         mod = self.bot.get_cog("Moderation")
         if mod and result.smurf_flags:
             await mod.post_flags(str(inter.guild_id), result.smurf_flags)
+        await self._refresh_board(inter.guild_id)
 
     @admin.command(name="reprocess", description="Roll back a match and process it again (most recent games only).")
     @app_commands.describe(match_id="The game ID from the post-game screen, e.g. 5650481942. The region is added for you.")
@@ -286,6 +355,7 @@ class AdminCog(commands.Cog, name="Admin"):
             except (RiotAPIError, RiotUnavailable) as e:
                 await inter.followup.send(friendly_error(e, context="match", match_id=mid)); return
         await inter.followup.send(embed=embeds.results_embed(result))
+        await self._refresh_board(inter.guild_id)
 
     @admin.command(name="rollback", description="Undo a match's LP changes (most recent games only).")
     @app_commands.describe(match_id="The game ID from the post-game screen, e.g. 5650481942. The region is added for you.")
@@ -301,6 +371,7 @@ class AdminCog(commands.Cog, name="Admin"):
             except ValueError as e:
                 await inter.followup.send(str(e)); return
         await inter.followup.send(f"Rolled back **{mid}**. Ratings restored to their pre-game values.")
+        await self._refresh_board(inter.guild_id)
 
     @admin.command(name="reset", description="Reset a player's ratings this season.")
     async def admin_reset(self, inter: discord.Interaction, member: discord.Member):
@@ -313,6 +384,7 @@ class AdminCog(commands.Cog, name="Admin"):
             await session.commit()
             await get_or_create_rating(session, p.id, "OVERALL", config.CURRENT_SEASON)
         await inter.followup.send(f"Reset **{member.display_name}** to {config.STARTING_LP} LP / placements.")
+        await self._refresh_board(inter.guild_id)
 
     @admin.command(name="modchannel", description="Where smurf flags and alerts are posted.")
     async def admin_modchannel(self, inter: discord.Interaction, channel: discord.TextChannel):
@@ -358,10 +430,12 @@ class AdminCog(commands.Cog, name="Admin"):
             was = f" (currently <#{current[key]}>)" if current[key] else ""
             wiring.append(f"{what}: #{spec.name}{was}")
         e.add_field(name="Bot settings it will point at these channels", value="\n".join(wiring), inline=False)
-        e.add_field(name="Also", value="Posts the player guide in #how-to-play and pins it. "
-                                       "#inhouse-queue is commands-only so the lobby post never gets buried; "
-                                       "players chat in #inhouse-chat. Each game gets a private thread under "
-                                       "#inhouse-queue and its own Blue and Red voice channels.", inline=False)
+        e.add_field(name="Also", value="Posts the player guide in #how-to-play with **Link my account** and "
+                                       "**My rank** buttons, and pins it. Posts the live top "
+                                       f"{config.LEADERBOARD_SIZE} in #leaderboard and the mod **control panel** "
+                                       "in #bot-admin. #inhouse-queue is commands-only so the lobby post never "
+                                       "gets buried; players chat in #inhouse-chat. Each game gets a private "
+                                       "thread and its own Blue and Red voice channels.", inline=False)
         game_missing = server_setup.missing_game_permissions(guild.me.guild_permissions)
         if game_missing:
             names = ", ".join(server_setup.pretty_permission(m) for m in game_missing)
@@ -481,8 +555,8 @@ class AdminCog(commands.Cog, name="Admin"):
         lines.append(f"{'✅' if cas else '⛔'} Casual lobbies (no LP)")
         lines += notes
         if not changed:
-            lines.append("\nChange with options, e.g. `/admin modes balanced:False captain:False` "
-                         "to make pick order the only way to play.")
+            lines.append("\nChange with options, e.g. `/admin modes pick_order:False balanced:False captain:True "
+                         "default:Captain draft` to make captain draft the only way to play.")
         await inter.response.send_message("\n".join(lines), ephemeral=True)
 
     @admin.command(name="queuechannel", description="Lock inhouse queues to ONE channel (recommended).")
@@ -532,10 +606,25 @@ class AdminCog(commands.Cog, name="Admin"):
                          f"vision {mean.get('vision_per_min', 0):.2f}/min, dmg share {mean.get('damage_share', 0)*100:.0f}%, deaths/min {mean.get('deaths_per_min', 0):.2f}")
         await inter.followup.send("\n".join(lines))
 
-    @admin.command(name="season", description="Show the season. New seasons are started by changing CURRENT_SEASON in .env and restarting.")
+    @admin.command(name="season", description="Show the current season and how new seasons work.")
     async def admin_season(self, inter: discord.Interaction):
-        await inter.response.send_message(f"Current season: **{config.CURRENT_SEASON}**. Ratings, baselines and leaderboards are per season; "
-                                          "old seasons stay in the database.", ephemeral=True)
+        await inter.response.send_message(
+            f"It's **Season {config.CURRENT_SEASON}**.\n"
+            f"Start the next one with **New season** on the control panel (`/panel`). LP goes back to "
+            f"{config.STARTING_LP} and everyone plays {config.PLACEMENT_GAMES} placements again, but "
+            f"{int(config.SEASON_CARRYOVER * 100)}% of each player's hidden rating carries over so teams stay fair. "
+            f"The old season's final standings stay in the leaderboard channel, and its games stay in the database.",
+            ephemeral=True)
+
+    @admin.command(name="leaderboardchannel", description="Post the live leaderboard (top players) in a channel.")
+    @app_commands.describe(channel="Where the leaderboard lives. Best as a channel only the bot can post in.")
+    async def admin_leaderboardchannel(self, inter: discord.Interaction, channel: discord.TextChannel):
+        await inter.response.defer(ephemeral=True)
+        async with SessionLocal() as session:
+            await settings.set_setting(session, str(inter.guild_id), settings.KEY_LEADERBOARD_CHANNEL, str(channel.id))
+            await settings.set_setting(session, str(inter.guild_id), settings.KEY_LEADERBOARD_MESSAGE, "")
+        ranking = self.bot.get_cog("Ranking")
+        await inter.followup.send(await ranking.refresh_board(str(inter.guild_id), force=True), ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
