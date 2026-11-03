@@ -92,7 +92,8 @@ async def begin(session: AsyncSession, riot: Any, discord_id: str, discord_name:
         raise LinkError(
             f"You're already linked to **{me.summoner_name}**. Switching to a different account needs a "
             f"moderator: ask them to run `/admin unlink` on you, then link the new one.")
-    if me is not None and me.riot_puuid == puuid and me.link_verified:
+    instant = config.LINK_VERIFY != "icon"
+    if me is not None and me.riot_puuid == puuid and (me.link_verified or instant):
         me.summoner_name = riot_id
         me.discord_username = discord_name
         await session.commit()
@@ -101,6 +102,18 @@ async def begin(session: AsyncSession, riot: Any, discord_id: str, discord_name:
     summoner = await riot.get_summoner_by_puuid(puuid)
     current_icon = summoner.get("profileIconId")
     holder = await session.scalar(select(Player).where(Player.riot_puuid == puuid, Player.discord_id != discord_id))
+
+    if instant:
+        if holder is not None:
+            raise LinkError(f"**{riot_id}** is already linked to **{holder.discord_username}**. If it's yours, "
+                            f"ask a moderator to move it to you.")
+        me = await _attach(session, riot, me, discord_id, discord_name, puuid, riot_id, summoner,
+                           verified=False, now=now)
+        await session.commit()
+        from bot.services import smurf_detector
+        flag = await smurf_detector.evaluate_link(session, me, summoner,
+                                                  (me.riot_rank_snapshot or {}).get("entries"))
+        return Linked(player=me, riot_id=riot_id, flag=flag)
 
     req = await session.scalar(select(LinkRequest).where(LinkRequest.discord_id == discord_id))
     if req is not None and req.puuid == puuid and _aware(req.expires_at) > now:
@@ -120,7 +133,6 @@ async def begin(session: AsyncSession, riot: Any, discord_id: str, discord_name:
 async def verify(session: AsyncSession, riot: Any, discord_id: str, discord_name: str,
                  now: datetime | None = None) -> Linked:
     from bot.services import smurf_detector
-    from bot.services.game_processor import get_or_create_rating
 
     now = now or datetime.now(timezone.utc)
     req = await session.scalar(select(LinkRequest).where(LinkRequest.discord_id == discord_id))
@@ -146,27 +158,36 @@ async def verify(session: AsyncSession, riot: Any, discord_id: str, discord_name
         holder.riot_puuid, holder.summoner_name, holder.link_verified = None, None, False
         await session.flush()        # free the unique riot_puuid before giving it to the owner
 
-    me = await _player(session, discord_id)
+    me = await _attach(session, riot, await _player(session, discord_id), discord_id, discord_name,
+                       req.puuid, req.riot_id, summoner, verified=True, now=now)
+    riot_id = req.riot_id
+    await session.delete(req)
+    await session.commit()
+    flag = await smurf_detector.evaluate_link(session, me, summoner, me.riot_rank_snapshot["entries"])
+    return Linked(player=me, riot_id=riot_id, transferred_from=transferred_from, flag=flag)
+
+
+async def _attach(session: AsyncSession, riot: Any, me: Player | None, discord_id: str, discord_name: str,
+                  puuid: str, riot_id: str, summoner: dict, verified: bool, now: datetime) -> Player:
+    """Put the Riot account on the player's profile (creating it if needed). Caller commits."""
+    from bot.services.game_processor import get_or_create_rating
+
     if me is None:
         me = Player(discord_id=discord_id, discord_username=discord_name)
         session.add(me)
         await session.flush()
     entries = None
     try:
-        entries = await riot.get_league_entries_by_puuid(req.puuid)
+        entries = await riot.get_league_entries_by_puuid(puuid)
     except Exception:
         pass
-    me.riot_puuid, me.summoner_name, me.discord_username = req.puuid, req.riot_id, discord_name
-    me.link_verified = True
+    me.riot_puuid, me.summoner_name, me.discord_username = puuid, riot_id, discord_name
+    me.link_verified = verified
     me.linked_at = now
     me.summoner_level = int(summoner.get("summonerLevel", 0) or 0) or None
     me.riot_rank_snapshot = {"entries": entries or [], "summoner_level": me.summoner_level}
     await get_or_create_rating(session, me.id, "OVERALL", config.CURRENT_SEASON)
-    riot_id = req.riot_id
-    await session.delete(req)
-    await session.commit()
-    flag = await smurf_detector.evaluate_link(session, me, summoner, entries)
-    return Linked(player=me, riot_id=riot_id, transferred_from=transferred_from, flag=flag)
+    return me
 
 
 async def cancel(session: AsyncSession, discord_id: str) -> bool:

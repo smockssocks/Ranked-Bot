@@ -225,7 +225,7 @@ class AdminCog(commands.Cog, name="Admin"):
                 pass
 
     # ---- self-serve link, with proof of ownership --------------------------
-    @app_commands.command(name="link", description="Link your Riot account (GameName#TAG). You'll prove it's yours.")
+    @app_commands.command(name="link", description="Link your Riot account (GameName#TAG).")
     @app_commands.describe(riot_id="Your Riot ID with tag, exactly as in the League client, e.g. Danman#NA1")
     async def link(self, inter: discord.Interaction, riot_id: str):
         await self.start_link(inter, riot_id)
@@ -242,8 +242,16 @@ class AdminCog(commands.Cog, name="Admin"):
             except (RiotAPIError, RiotUnavailable) as e:
                 await inter.followup.send(friendly_error(e), ephemeral=True); return
         if isinstance(result, account_link.Linked):
-            await inter.followup.send(f"Your Riot ID is updated to **{result.riot_id}**. You're all set.",
-                                      ephemeral=True)
+            if result.refreshed_only:
+                await inter.followup.send(f"Your Riot ID is updated to **{result.riot_id}**. You're all set.",
+                                          ephemeral=True)
+                return
+            await inter.followup.send(
+                f"**Linked.** {result.riot_id} is linked to you. You can join queues. "
+                f"Your first {config.PLACEMENT_GAMES} games are placements.", ephemeral=True)
+            mod = self.bot.get_cog("Moderation")
+            if inter.guild_id and result.flag and mod:
+                await mod.post_flags(str(inter.guild_id), [result.flag])
             return
         await inter.followup.send(embed=await self._challenge_embed(result), view=LinkVerifyView(self),
                                   ephemeral=True)

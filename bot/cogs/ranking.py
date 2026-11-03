@@ -328,8 +328,9 @@ class RankingCog(commands.Cog, name="Ranking"):
                  "**1. Link your Riot account**\n"
                  "Press **Link my account** in the how-to-play channel, or run `/link` with your full Riot ID, "
                  "for example `/link Danman#NA1`.\n"
-                 "The bot will ask you to switch your League profile icon once, to prove the account is "
-                 "yours. You only do this once, and you cannot join a queue until you have.")
+                 + ("The bot will ask you to switch your League profile icon once, to prove the account is "
+                    "yours. " if config.LINK_VERIFY == "icon" else "")
+                 + "You only do this once, and you cannot join a queue until you have.")
 
         e = discord.Embed(
             title="How to play inhouses",

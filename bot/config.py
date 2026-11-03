@@ -107,6 +107,11 @@ def anchor_sqlite_url(url: str, root: Path = ROOT) -> str:
 DATABASE_URL = anchor_sqlite_url(os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ranked_bot.db"))
 BACKUP_KEEP = _int("BACKUP_KEEP", 14)   # database copies kept in the backups folder
 
+# --- Account linking -------------------------------------------------------
+# none = /link links right away (mods fix wrong claims); icon = player proves ownership by
+# switching their profile icon, which Riot can take a long time to report.
+LINK_VERIFY = os.getenv("LINK_VERIFY", "none").strip().lower()
+
 # --- Drafter.lol -----------------------------------------------------------
 DRAFTER_API_KEY = os.getenv("DRAFTER_API_KEY", "")
 DRAFTER_API_BASE = os.getenv("DRAFTER_API_BASE", "https://api.drafter.lol")

@@ -32,6 +32,13 @@ class FakeRiot:
 NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _icon_mode(request, monkeypatch):
+    """Most of these tests cover the icon check; the instant ones switch it off themselves."""
+    from bot import config
+    monkeypatch.setattr(config, "LINK_VERIFY", "none" if "instant" in request.node.name else "icon")
+
+
 async def test_link_requires_changing_to_the_named_icon(db):
     riot = FakeRiot()
     async with db() as s:
@@ -146,3 +153,25 @@ def test_riot_id_parsing_and_icon_choice():
         for _ in range(50):
             icon = al.pick_icon(current, rng)
             assert icon in al.STARTER_ICONS and icon != current
+
+
+async def test_instant_link_links_right_away_unverified(db):
+    riot = FakeRiot()
+    async with db() as s:
+        linked = await al.begin(s, riot, "111", "dan", "Danman#NA1", now=NOW)
+        assert isinstance(linked, al.Linked) and not linked.refreshed_only
+        p = await s.scalar(select(Player).where(Player.discord_id == "111"))
+        assert p.riot_puuid == "puuid-dan" and p.summoner_name == "Danman#NA1" and not p.link_verified
+        assert await s.scalar(select(LinkRequest)) is None
+        again = await al.begin(s, riot, "111", "dan", "Danman#NA1", now=NOW)
+        assert isinstance(again, al.Linked) and again.refreshed_only
+
+
+async def test_instant_link_cannot_take_someone_elses_account(db):
+    riot = FakeRiot()
+    async with db() as s:
+        await al.begin(s, riot, "111", "dan", "Danman#NA1", now=NOW)
+        with pytest.raises(al.LinkError, match=r"already linked to \*\*dan"):
+            await al.begin(s, riot, "666", "impostor", "Danman#NA1", now=NOW)
+        p = await s.scalar(select(Player).where(Player.riot_puuid == "puuid-dan"))
+        assert p.discord_id == "111"

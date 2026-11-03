@@ -31,10 +31,12 @@ def how_to_play(queue_channel_id: int | None = None, chat_channel_id: int | None
     queue = f"<#{queue_channel_id}>" if queue_channel_id else "the queue channel"
     chat = f" Chat about games in <#{chat_channel_id}>." if chat_channel_id else ""
     teams = TEAMS.get(mode, TEAMS["captain"])
+    from bot import config
+    proof = " You'll switch your profile icon once to prove it's yours." if config.LINK_VERIFY == "icon" else ""
     return f"""**How to play inhouses** :trophy:
 
 **1. Link your account (once)**
-Press **Link my account** below and type your Riot ID exactly as the League client shows it, like `Danman#NA1`. You'll switch your profile icon once to prove it's yours. You can't queue until you're linked.
+Press **Link my account** below and type your Riot ID exactly as the League client shows it, like `Danman#NA1`.{proof} You can't queue until you're linked.
 
 **2. Join the queue**
 All queues happen in {queue}.{chat}
